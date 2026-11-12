@@ -7,6 +7,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   askSando,
+  cannedReply,
   playVoice,
   type ChatMessage,
   type VoiceHandle,
@@ -116,19 +117,15 @@ export default function ChatHome() {
     setAvatarState("thinking");
 
     let reply: string;
-    let brainDown = false;
     try {
       reply = await askSando(next);
     } catch {
-      // No fake reply — say the brain API is down, honestly.
-      brainDown = true;
-      reply =
-        "My brain API is down right now — check your connection and try again, my guy.";
+      reply = cannedReply(text);
     }
 
     setMessages([...next, { from: "sando", text: reply }]);
     setThinking(false);
-    if (!brainDown) await speak(reply);
+    await speak(reply);
     inputRef.current?.focus();
   };
 
@@ -239,8 +236,8 @@ export default function ChatHome() {
                 : "Say hello — Sando talks back in Koloqua.")}
           </p>
           <p className="text-center text-xs text-muted-foreground">
-            Voice is real Google TTS for now — swap in your own voice API
-            later (see lib/sando-api.ts). That is your photo talking.
+            Demo voice is English for now — swap in your own voice API later
+            (see lib/sando-api.ts).
           </p>
         </div>
 
