@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./openui-monochrome.css";
 
 @custom-variant dark (&:is(.dark *));
 
