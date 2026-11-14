@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { getDisplayName, toPlainText } from "@/lib/format";
@@ -33,6 +34,16 @@ const suggestions = [
   "Quiz me on Gio vocabulary",
 ];
 
+// The OpenUI library only runs in the browser; keep it out of SSR entirely.
+const OpenUIAnswer = dynamic(() => import("@/components/chat/OpenUIAnswer"), {
+  ssr: false,
+});
+
+/** True when the text starts a plausible OpenUI Lang program. */
+function looksLikeOpenUI(code: string): boolean {
+  return /^\s*(root|[A-Za-z_][A-Za-z0-9_]*)\s*=/m.test(code);
+}
+
 /* ------------------------------------------------------------------ */
 /* Small pieces                                                        */
 /* ------------------------------------------------------------------ */
@@ -64,8 +75,26 @@ function StopIcon() {
   );
 }
 
-function Bubble({ message }: { message: Message }) {
+function Bubble({
+  message,
+  onFollowUp,
+  onStateUpdate,
+}: {
+  message: Message;
+  onFollowUp: (prompt: string) => void;
+  onStateUpdate: (id: string, state: Record<string, unknown>) => void;
+}) {
   const mine = message.role === "user";
+  if (!mine && message.kind === "openui") {
+    return (
+      <OpenUIAnswer
+        code={message.content}
+        state={message.uiState}
+        onStateUpdate={(state) => onStateUpdate(message.id, state)}
+        onFollowUp={onFollowUp}
+      />
+    );
+  }
   return (
     <div className={cn("flex", mine ? "justify-end" : "justify-start")}>
       <div
@@ -172,7 +201,7 @@ function Chat({ routeId }: { routeId: string | null }) {
   }, []);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, mode: "text" | "ui" = "ui") => {
       const content = text.trim();
       if (!content || loading) return;
 
@@ -213,13 +242,17 @@ function Chat({ routeId }: { routeId: string | null }) {
           history,
           token,
           signal: controller.signal,
+          mode,
         });
 
+        // A UI-mode reply that is not a program is prose: store it as text
+        // so it renders as a normal bubble instead of an empty box.
         const answer: Message = {
           id: crypto.randomUUID(),
           role: "assistant",
           content: reply,
           createdAt: Date.now(),
+          kind: mode === "ui" && looksLikeOpenUI(reply) ? "openui" : "text",
         };
         const updated = [...next, answer];
         // Persists to the store either way; the view follows the store.
@@ -236,6 +269,28 @@ function Chat({ routeId }: { routeId: string | null }) {
       }
     },
     [conversationId, messages, loading, getToken],
+  );
+
+  const onFollowUp = useCallback(
+    (prompt: string) => {
+      void send(prompt);
+    },
+    [send],
+  );
+
+  /** Persists an in-answer form's state on its stored message. */
+  const onStateUpdate = useCallback(
+    (id: string, state: Record<string, unknown>) => {
+      const cid = conversationId;
+      if (!cid) return;
+      const convo = getConversation(cid);
+      if (!convo) return;
+      saveConversation(
+        cid,
+        convo.messages.map((m) => (m.id === id ? { ...m, uiState: state } : m)),
+      );
+    },
+    [conversationId],
   );
 
   // "Ask Sando" from Help lands here with ?prompt=… — send each prompt once.
@@ -307,7 +362,12 @@ function Chat({ routeId }: { routeId: string | null }) {
         ) : (
           <div className="mx-auto flex max-w-3xl flex-col gap-4 py-4">
             {messages.map((m) => (
-              <Bubble key={m.id} message={m} />
+              <Bubble
+                key={m.id}
+                message={m}
+                onFollowUp={onFollowUp}
+                onStateUpdate={onStateUpdate}
+              />
             ))}
             {loading && <TypingBubble />}
             {error && (
