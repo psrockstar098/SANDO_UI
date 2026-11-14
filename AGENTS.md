@@ -28,3 +28,10 @@ Retain qualifying friction even if it is later fixed or worked around; record th
 Before the final response, run one reporting pass. If candidates remain, from this file's directory run `npx --no-install next internal agent-feedback-instructions` once without piping or truncating its output. Follow its output or error guidance. If a network sandbox blocks it, retry with network access; if it still returns no output, continue normally.
 
 <!-- END:nextjs-agent-feedback -->
+
+## Design: monochrome only
+
+Only black, white, `neutral-*`, and `currentColor` are allowed. Any new
+color must be expressed as a black/white mix. OpenUI tokens are generated
+to grayscale by `scripts/generate-openui-theme.mjs`; do not add colored
+tokens by hand.
