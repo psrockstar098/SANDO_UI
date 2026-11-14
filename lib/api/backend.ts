@@ -130,3 +130,81 @@ export async function callBackend(
     clearTimeout(timer);
   }
 }
+
+export type BackendStreamResult =
+  | { ok: true; body: ReadableStream<Uint8Array> }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Calls the backend and returns its response stream untouched.
+ *
+ * Unlike `callBackend`, the timeout only guards the wait for headers: once
+ * `fetch` resolves the timer is cleared, because aborting after headers
+ * would kill the stream. Callers must consume `body` promptly.
+ */
+export async function callBackendStream(
+  path: string,
+  request: Request,
+  body: unknown,
+  timeoutMs = CHAT_TIMEOUT_MS,
+): Promise<BackendStreamResult> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const authorization = request.headers.get("authorization");
+
+    const upstream = await fetch(`${backendUrl()}${path}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/x-ndjson",
+        "Content-Type": "application/json",
+        ...(authorization && { Authorization: authorization }),
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    // Headers arrived: the timer must not kill the stream.
+    clearTimeout(timer);
+
+    if (!upstream.ok) {
+      const data = parseBody(await upstream.text());
+      const status =
+        upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502;
+      return {
+        ok: false,
+        status,
+        error:
+          errorMessage(data) ?? `Sando replied with status ${upstream.status}.`,
+      };
+    }
+
+    if (!upstream.body) {
+      return { ok: false, status: 502, error: "Sando returned no stream." };
+    }
+
+    return { ok: true, body: upstream.body };
+  } catch (err) {
+    if (timedOut) {
+      return {
+        ok: false,
+        status: 504,
+        error: "Sando took too long to answer. Please try again.",
+      };
+    }
+    console.error(`Backend stream ${path} failed:`, err);
+    return {
+      ok: false,
+      status: 502,
+      error: "Can't reach Sando right now. Please try again.",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}

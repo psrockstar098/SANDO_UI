@@ -1,15 +1,19 @@
 /**
  * Server-side proxy for chat.
  *
- *   POST /api/chat  { messages: [{ role, content }] }
- *   -> 200 { reply: string }
- *   -> 4xx/5xx { error: string }
+ *   POST /api/chat  { messages, mode?, stream? }
+ *   -> 200 { reply, mode }                          (non-streaming)
+ *   -> 200 application/x-ndjson                     (streaming, mode "ui" only)
+ *   -> 4xx/5xx { error }
  *
  * The backend answers with `{ response, dialect, choices }`; the UI only needs
- * the text, so it is flattened to `{ reply }` here.
+ * the text, so it is flattened to `{ reply }` here. In UI mode the reply is
+ * OpenUI Lang and is passed through untouched — `toPlainText` applies to
+ * text mode only. Streaming forwards the backend's base64 NDJSON frames
+ * unchanged; the browser decodes them (see `lib/chat/openui.ts`).
  */
 
-import { CHAT_TIMEOUT_MS, callBackend, fail } from "@/lib/api/backend";
+import { CHAT_TIMEOUT_MS, callBackend, callBackendStream, fail } from "@/lib/api/backend";
 import { toPlainText } from "@/lib/format";
 
 type Turn = { role: "user" | "assistant"; content: string };
@@ -67,9 +71,36 @@ export async function POST(request: Request) {
     );
   }
 
+  const mode = payload.mode === "ui" ? "ui" : "text";
+  const stream = payload.stream === true;
+
+  if (stream) {
+    if (mode !== "ui") {
+      return fail('streaming is only supported for mode "ui".', 400);
+    }
+
+    const result = await callBackendStream("/api/chat", request, {
+      messages,
+      mode,
+      stream: true,
+    });
+
+    if (!result.ok) {
+      return fail(result.error, result.status);
+    }
+
+    return new Response(result.body, {
+      headers: {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "cache-control": "no-store",
+        "x-accel-buffering": "no",
+      },
+    });
+  }
+
   const result = await callBackend("/api/chat", request, {
     method: "POST",
-    body: { messages, stream: false },
+    body: { messages, mode, stream: false },
     timeoutMs: CHAT_TIMEOUT_MS,
   });
 
@@ -82,5 +113,8 @@ export async function POST(request: Request) {
     return fail("Sando returned an empty response.", 502);
   }
 
-  return Response.json({ reply: toPlainText(rawReply) });
+  return Response.json({
+    reply: mode === "ui" ? rawReply : toPlainText(rawReply),
+    mode,
+  });
 }

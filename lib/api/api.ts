@@ -1,3 +1,5 @@
+import { decodeFrameBytes, parseOpenUIFrame } from "@/lib/chat/openui";
+
 /* ------------------------------------------------------------------ */
 /* Config                                                              */
 /* ------------------------------------------------------------------ */
@@ -30,10 +32,13 @@ export interface SendPromptParams {
   token: string | null;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** "ui" asks the backend to answer as OpenUI Lang; default "text". */
+  mode?: "text" | "ui";
 }
 
 export interface ChatResponse {
   reply: string;
+  mode: "text" | "ui";
 }
 
 /** The profile the backend keeps for the signed-in user. */
@@ -191,6 +196,7 @@ export async function sendPrompt({
   token,
   signal,
   timeoutMs,
+  mode: requestedMode = "text",
 }: SendPromptParams): Promise<ChatResponse> {
   const text = prompt.trim();
   if (!text) throw new ApiError("Prompt is empty.", 400);
@@ -200,12 +206,12 @@ export async function sendPrompt({
     { role: "user", content: text },
   ];
 
-  const data = await request<{ reply?: unknown }>(CHAT_PATH, {
+  const data = await request<{ reply?: unknown; mode?: unknown }>(CHAT_PATH, {
     method: "POST",
     token,
     signal,
     timeoutMs,
-    body: { messages, stream: false },
+    body: { messages, mode: requestedMode, stream: false },
   });
 
   const reply =
@@ -214,7 +220,9 @@ export async function sendPrompt({
   if (!reply) {
     throw new ApiError("The server returned an empty response.", 502, data);
   }
-  return { reply };
+  const mode =
+    data.mode === "ui" || data.mode === "text" ? data.mode : requestedMode;
+  return { reply, mode };
 }
 
 /** The profile and chat preferences the backend holds for this user. */
@@ -260,4 +268,141 @@ export async function deleteAccount({
     signal,
     timeoutMs,
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* Streaming (OpenUI mode)                                             */
+/* ------------------------------------------------------------------ */
+
+export interface StreamPromptParams extends SendPromptParams {
+  mode: "ui";
+  onToken: (chunk: string) => void;
+}
+
+export interface StreamChatResponse {
+  reply: string;
+  mode: "ui";
+}
+
+type ApiErrorWithPartial = ApiError & { partial?: string };
+
+/**
+ * Streams a UI-mode answer from `/api/chat` as base64 NDJSON frames.
+ *
+ * `onToken` receives each decoded chunk as it arrives. When the backend
+ * reports an error mid-stream, or the connection fails after tokens, the
+ * thrown `ApiError` carries the accumulated reply as `partial` so the caller
+ * can keep it. The caller's `signal` aborts the reader; that abort is
+ * rethrown as-is. No internal timeout: a generation may legitimately run
+ * long, and the caller owns cancellation.
+ */
+export async function streamPrompt({
+  prompt,
+  history = [],
+  token,
+  signal,
+  onToken,
+}: StreamPromptParams): Promise<StreamChatResponse> {
+  const text = prompt.trim();
+  if (!text) throw new ApiError("Prompt is empty.", 400);
+
+  const messages: ChatTurn[] = [
+    ...history.filter((t) => t.content.trim().length > 0),
+    { role: "user", content: text },
+  ];
+
+  let res: Response;
+  try {
+    res = await fetch(CHAT_PATH, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/x-ndjson",
+        ...(token && { Authorization: `Bearer ${token}` }),
+      },
+      body: JSON.stringify({ messages, mode: "ui", stream: true }),
+      signal,
+    });
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    throw new ApiError("Can't reach the server. Check your connection.", 0);
+  }
+
+  if (!res.ok) {
+    const raw = await res.text();
+    let data: unknown = null;
+    if (raw) {
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = raw;
+      }
+    }
+    throw new ApiError(
+      extractMessage(data) ?? `Request failed (${res.status})`,
+      res.status,
+      data,
+    );
+  }
+
+  if (!res.body) {
+    throw new ApiError("The server did not return a stream.", 502);
+  }
+
+  // One decoder for the NDJSON wire bytes, one for the base64 frame
+  // payloads; both stream so a UTF-8 codepoint split across frames survives.
+  const wire = new TextDecoder("utf-8");
+  const payload = new TextDecoder("utf-8");
+  const reader = res.body.getReader();
+  let buffer = "";
+  let reply = "";
+
+  const withPartial = (err: ApiError): ApiErrorWithPartial => {
+    const withReply = err as ApiErrorWithPartial;
+    withReply.partial = reply;
+    return withReply;
+  };
+
+  /** Handles one complete NDJSON line; returns true when the stream ends. */
+  const handleLine = (line: string): boolean => {
+    const frame = parseOpenUIFrame(line);
+    if (!frame) return false;
+    if (frame.error !== undefined) {
+      throw withPartial(new ApiError(frame.error, 502));
+    }
+    if (frame.d !== undefined) {
+      const chunk = payload.decode(decodeFrameBytes(frame.d), { stream: true });
+      reply += chunk;
+      onToken(chunk);
+    }
+    return frame.done === true;
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += wire.decode(value, { stream: true });
+      let nl = buffer.indexOf("\n");
+      while (nl !== -1) {
+        if (handleLine(buffer.slice(0, nl))) return { reply, mode: "ui" };
+        buffer = buffer.slice(nl + 1);
+        nl = buffer.indexOf("\n");
+      }
+    }
+    // The stream closed without a done frame: flush both decoders and
+    // process any trailing line, then return what arrived.
+    buffer += wire.decode();
+    if (buffer.trim()) handleLine(buffer);
+    reply += payload.decode();
+    return { reply, mode: "ui" };
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (isAbortError(err)) throw err;
+    throw withPartial(
+      new ApiError("Can't reach the server. Check your connection.", 0),
+    );
+  } finally {
+    reader.releaseLock();
+  }
 }
