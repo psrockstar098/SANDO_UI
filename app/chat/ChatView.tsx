@@ -11,6 +11,7 @@ import {
   errorMessage,
   isAbortError,
   sendPrompt,
+  streamPrompt,
   type ChatTurn,
 } from "@/lib/api/api";
 import {
@@ -42,6 +43,24 @@ const OpenUIAnswer = dynamic(() => import("@/components/chat/OpenUIAnswer"), {
 /** True when the text starts a plausible OpenUI Lang program. */
 function looksLikeOpenUI(code: string): boolean {
   return /^\s*(root|[A-Za-z_][A-Za-z0-9_]*)\s*=/m.test(code);
+}
+
+/** True once the text contains an OpenUI Lang assignment statement. */
+function hasAssignment(code: string): boolean {
+  return /(^|\n)\s*(root|[A-Za-z_][A-Za-z0-9_]*)\s*=/.test(code);
+}
+
+function assistantMessage(
+  content: string,
+  kind: "text" | "openui",
+): Message {
+  return {
+    id: crypto.randomUUID(),
+    role: "assistant",
+    content,
+    createdAt: Date.now(),
+    kind,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -149,6 +168,10 @@ function Chat({ routeId }: { routeId: string | null }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Live streaming answer; written to the store when it ends. */
+  const [draft, setDraft] = useState<{ id: string; content: string } | null>(
+    null,
+  );
   /** Conversation the in-flight reply belongs to (null when idle). */
   const [pendingId, setPendingId] = useState<string | null>(null);
 
@@ -184,7 +207,7 @@ function Chat({ routeId }: { routeId: string | null }) {
   // Keep the newest message in view
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, loading]);
+  }, [messages, loading, draft?.content]);
 
   // Auto-grow the textarea (max ~6 lines)
   useEffect(() => {
@@ -231,37 +254,77 @@ function Chat({ routeId }: { routeId: string | null }) {
       abortRef.current = controller;
       setPendingId(id);
 
+      // Accumulated stream text, kept outside `try` so `catch` can save the
+      // partial answer without reading stale state from the closure.
+      let streamed = "";
+
       try {
         const token = await getToken();
         const history: ChatTurn[] = next
           .slice(0, -1)
           .map(({ role, content: c }) => ({ role, content: c }));
 
-        const { reply } = await sendPrompt({
+        if (mode === "text") {
+          const { reply } = await sendPrompt({
+            prompt: content,
+            history,
+            token,
+            signal: controller.signal,
+            mode,
+          });
+          // Persists to the store either way; the view follows the store.
+          saveConversation(id, [...next, assistantMessage(reply, "text")]);
+          return;
+        }
+
+        const draftId = crypto.randomUUID();
+        setDraft({ id: draftId, content: "" });
+        const { reply } = await streamPrompt({
           prompt: content,
           history,
           token,
+          mode: "ui",
           signal: controller.signal,
-          mode,
+          onToken: (chunk) => {
+            streamed += chunk;
+            setDraft((d) =>
+              d ? { ...d, content: d.content + chunk } : d,
+            );
+          },
         });
 
         // A UI-mode reply that is not a program is prose: store it as text
         // so it renders as a normal bubble instead of an empty box.
-        const answer: Message = {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: reply,
-          createdAt: Date.now(),
-          kind: mode === "ui" && looksLikeOpenUI(reply) ? "openui" : "text",
-        };
-        const updated = [...next, answer];
+        const kind = looksLikeOpenUI(reply) ? "openui" : "text";
         // Persists to the store either way; the view follows the store.
-        saveConversation(id, updated);
+        saveConversation(id, [...next, assistantMessage(reply, kind)]);
       } catch (err) {
-        if (!isAbortError(err) && activeId.current === id) {
-          setError(errorMessage(err));
+        if (isAbortError(err)) {
+          // Stop keeps the partial answer when there is one.
+          if (streamed.trim()) {
+            const kind = looksLikeOpenUI(streamed) ? "openui" : "text";
+            saveConversation(id, [
+              ...next,
+              assistantMessage(streamed, kind),
+            ]);
+          }
+        } else {
+          // A mid-stream failure keeps the partial answer and shows the
+          // error text below it.
+          const partial = (err as { partial?: string }).partial;
+          if (partial && partial.trim()) {
+            const kind = looksLikeOpenUI(partial) ? "openui" : "text";
+            saveConversation(id, [
+              ...next,
+              assistantMessage(partial, kind),
+            ]);
+          }
+          if (activeId.current === id) {
+            setError(errorMessage(err));
+          }
         }
       } finally {
+        setDraft(null);
         setPendingId(null);
         if (abortRef.current === controller) abortRef.current = null;
         setLoading(false);
@@ -369,7 +432,21 @@ function Chat({ routeId }: { routeId: string | null }) {
                 onStateUpdate={onStateUpdate}
               />
             ))}
-            {loading && <TypingBubble />}
+            {draft &&
+              (hasAssignment(draft.content) ? (
+                <OpenUIAnswer
+                  code={draft.content}
+                  isStreaming
+                  onFollowUp={(prompt) => void send(prompt)}
+                />
+              ) : (
+                <div className="flex justify-start">
+                  <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-md bg-white/[0.07] px-4 py-2.5 text-sm leading-relaxed text-neutral-100 md:max-w-[70%]">
+                    {draft.content}
+                  </div>
+                </div>
+              ))}
+            {loading && !draft && <TypingBubble />}
             {error && (
               <p role="alert" className="text-center text-xs text-neutral-300">
                 {error}
