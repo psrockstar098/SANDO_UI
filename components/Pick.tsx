@@ -26,7 +26,12 @@ export function Pick({
   className?: string;
 }) {
   return (
-    <Select value={value} onValueChange={onChange}>
+    <Select
+      value={value}
+      onValueChange={(next) => {
+        if (next != null) onChange(next);
+      }}
+    >
       <SelectTrigger aria-label={label} className={cn("w-full", className)}>
         <SelectValue />
       </SelectTrigger>

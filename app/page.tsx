@@ -8,6 +8,9 @@ import { cn } from "@/lib/utils";
 // Point this at your Keycloak sign-up URL
 const SIGNUP = process.env.NEXT_PUBLIC_SIGNUP_URL ?? "/chat";
 
+// Evaluated at build time: reading the clock during render breaks prerendering.
+const YEAR = new Date().getFullYear();
+
 const nav = [
   { label: "Hear Sando", href: "#hear" },
   { label: "Languages", href: "#languages" },
@@ -125,7 +128,7 @@ export default function Landing() {
             ))}
           </nav>
 
-          <div className="flex items-center gap-2">
+          {/* <div className="flex items-center gap-2">
             <Link
               href="/chat"
               className={cn(
@@ -143,7 +146,7 @@ export default function Landing() {
               Start free
             </Link>
             <MobileNav items={[...nav, { label: "Sign in", href: "/chat" }]} />
-          </div>
+          </div> */}
         </div>
       </header>
 
@@ -164,7 +167,7 @@ export default function Landing() {
                 href={SIGNUP}
                 className={cn(buttonVariants({ size: "lg" }), pill)}
               >
-                Start chatting free
+                Start chatting
               </Link>
               <a
                 href="#hear"
@@ -296,7 +299,7 @@ export default function Landing() {
 
       <footer className="border-t border-border">
         <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-10 text-sm text-muted-foreground sm:px-6 md:flex-row md:items-center md:justify-between">
-          <p>© {new Date().getFullYear()} Sando. Made for Liberia.</p>
+          <p>© {YEAR} Sando. Made for Liberia.</p>
           <nav aria-label="Footer" className="flex flex-wrap gap-x-6 gap-y-2">
             <Link href="/plan" className="hover:text-foreground">
               Plans

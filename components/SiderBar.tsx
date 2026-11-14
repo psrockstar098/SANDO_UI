@@ -4,25 +4,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import React, { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { getDisplayName } from "@/lib/format";
+import { useAuth } from "@/hooks/useAuth";
+import { useConversations } from "@/hooks/useConversations";
+import { groupConversations, type Conversation } from "@/lib/chat/store";
 import { Icon, type IconName } from "./Icon";
-
-const USER_NAME = "Ghazaleh"; // TODO: read from your Keycloak session
-
-type Group = "Today" | "Yesterday" | "Previous 7 days";
-type Chat = { id: string; title: string; group: Group };
-const groups: Group[] = ["Today", "Yesterday", "Previous 7 days"];
-
-// Replace with your real history
-const chats: Chat[] = [
-  { id: "s1", title: "Gio Vocabulary Practice", group: "Today" },
-  { id: "s3", title: "Market phrases in Gio", group: "Today" },
-  { id: "s4", title: "Translate my letter to Koloqua", group: "Today" },
-  { id: "s5", title: "Grand Bassa proverbs", group: "Yesterday" },
-  { id: "s6", title: "Greeting elders in Nimba", group: "Yesterday" },
-  { id: "s2", title: "Liberian History Study", group: "Previous 7 days" },
-  { id: "s7", title: "Kpelle numbers", group: "Previous 7 days" },
-  { id: "s8", title: "Help with my CV", group: "Previous 7 days" },
-];
 
 type NavItem = { label: string; href: string; icon: IconName };
 const nav: NavItem[] = [
@@ -31,16 +17,38 @@ const nav: NavItem[] = [
 ];
 const languages = ["English", "Español", "Français", "العربية"];
 
-const surface = "border border-white/[0.07] bg-[#0a0a0b] text-zinc-100";
+const surface = "border border-white/[0.07] bg-[#0a0a0a] text-neutral-100";
 const hoverRow = "hover:bg-white/[0.06] hover:text-white";
 const activeRow = "bg-white/[0.09] text-white";
-const idleRow = "text-zinc-400";
+const idleRow = "text-neutral-400";
+
+/** Inline so it doesn't depend on your Icon set. Swap for <Icon name="logout" /> if you have one. */
+function LogoutIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className={className}
+    >
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <path d="M16 17l5-5-5-5" />
+      <path d="M21 12H9" />
+    </svg>
+  );
+}
 
 function ChatRow({
   chat,
   onNavigate,
 }: {
-  chat: Chat;
+  chat: Conversation;
   onNavigate?: () => void;
 }) {
   return (
@@ -56,14 +64,6 @@ function ChatRow({
     >
       {chat.title}
     </Link>
-  );
-}
-
-function Label({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="px-3 pb-1.5 pt-4 text-[11px] font-medium text-zinc-500">
-      {children}
-    </p>
   );
 }
 
@@ -92,9 +92,16 @@ function Panel({
   onLang: (l: string) => void;
 }) {
   const pathname = usePathname();
+  const { user, logout } = useAuth();
+  const conversations = useConversations();
+  const grouped = groupConversations(conversations);
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"menu" | "language">("menu");
   const wrap = useRef<HTMLDivElement>(null);
+
+  // Real user info (never an email address as the name).
+  const displayName = getDisplayName(user, "User");
+  const initial = displayName.charAt(0).toUpperCase();
 
   // Label visibility + row alignment per layout
   const lbl = full ? "" : collapsed ? "hidden" : "hidden lg:block";
@@ -134,9 +141,15 @@ function Panel({
     onNavigate?.();
   };
 
+  const handleLogout = () => {
+    setOpen(false);
+    onNavigate?.();
+    logout();
+  };
+
   const item =
     "flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors";
-  const menuItem = cn(item, "text-zinc-200 hover:bg-white/[0.07]");
+  const menuItem = cn(item, "text-neutral-200 hover:bg-white/[0.07]");
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
@@ -211,24 +224,27 @@ function Panel({
         )}
       >
         <div className="flex-1 overflow-y-auto [scrollbar-color:rgba(255,255,255,0.12)_transparent] [scrollbar-width:thin]">
-          {groups.map((g, i) => {
-            const list = chats.filter((c) => c.group === g);
-            return list.length === 0 ? null : (
-              <React.Fragment key={g}>
+          {grouped.length === 0 ? (
+            <p className="px-3 pt-1 text-[12px] text-neutral-500">
+              Your chats will show up here.
+            </p>
+          ) : (
+            grouped.map((g, i) => (
+              <React.Fragment key={g.label}>
                 <p
                   className={cn(
-                    "px-3 pb-1.5 text-[11px] font-medium text-zinc-500",
+                    "px-3 pb-1.5 text-[11px] font-medium text-neutral-500",
                     i === 0 ? "pt-1" : "pt-4",
                   )}
                 >
-                  {g}
+                  {g.label}
                 </p>
-                {list.map((c) => (
+                {g.items.map((c) => (
                   <ChatRow key={c.id} chat={c} onNavigate={onNavigate} />
                 ))}
               </React.Fragment>
-            );
-          })}
+            ))
+          )}
         </div>
       </div>
 
@@ -248,7 +264,7 @@ function Panel({
           role="menu"
           inert={!open}
           className={cn(
-            "absolute bottom-full left-0 z-30 mb-2 w-56 origin-bottom-left rounded-xl border border-white/10 bg-[#141416] p-1.5 shadow-2xl shadow-black/60 transition-[opacity,transform] duration-150",
+            "absolute bottom-full left-0 z-30 mb-2 w-56 origin-bottom-left rounded-xl border border-white/10 bg-[#141414] p-1.5 shadow-2xl shadow-black/60 transition-[opacity,transform] duration-150",
             open
               ? "translate-y-0 opacity-100"
               : "pointer-events-none translate-y-2 opacity-0",
@@ -256,13 +272,24 @@ function Panel({
         >
           {view === "menu" ? (
             <div className="flex flex-col">
+              {/* Who is signed in */}
+              <div className="px-3 pb-2 pt-1.5">
+                <p className="truncate text-sm font-medium text-white">
+                  {displayName}
+                </p>
+                {user?.email && (
+                  <p className="truncate text-xs text-neutral-500">{user.email}</p>
+                )}
+              </div>
+              <div className="mx-2 mb-1 h-px bg-white/[0.07]" />
+
               <Link
                 href="/chat/settings"
                 role="menuitem"
                 onClick={go}
                 className={menuItem}
               >
-                <Icon name="settings" className="text-zinc-400" />
+                <Icon name="settings" className="text-neutral-400" />
                 <span className="flex-1">Settings</span>
               </Link>
               <button
@@ -271,10 +298,10 @@ function Panel({
                 onClick={() => setView("language")}
                 className={menuItem}
               >
-                <Icon name="language" className="text-zinc-400" />
+                <Icon name="language" className="text-neutral-400" />
                 <span className="flex-1">Language</span>
-                <span className="text-xs text-zinc-500">{lang}</span>
-                <Icon name="chevron" size={14} className="text-zinc-500" />
+                <span className="text-xs text-neutral-500">{lang}</span>
+                <Icon name="chevron" size={14} className="text-neutral-500" />
               </button>
               <Link
                 href="/help"
@@ -282,7 +309,7 @@ function Panel({
                 onClick={go}
                 className={menuItem}
               >
-                <Icon name="help" className="text-zinc-400" />
+                <Icon name="help" className="text-neutral-400" />
                 <span className="flex-1">Get help</span>
               </Link>
               <div className="mx-2 my-1 h-px bg-white/[0.07]" />
@@ -297,6 +324,19 @@ function Panel({
               >
                 <Icon name="upgrade" /> Upgrade plan
               </Link>
+              <div className="mx-2 my-1 h-px bg-white/[0.07]" />
+              <button
+                type="button"
+                role="menuitem"
+                onClick={handleLogout}
+                className={cn(
+                  item,
+                  "text-neutral-300 hover:bg-white/10 hover:text-white",
+                )}
+              >
+                <LogoutIcon />
+                <span className="flex-1">Log out</span>
+              </button>
             </div>
           ) : (
             <div className="flex flex-col">
@@ -305,7 +345,7 @@ function Panel({
                 onClick={() => setView("menu")}
                 className={cn(
                   item,
-                  "text-zinc-400 hover:bg-white/[0.07] hover:text-white",
+                  "text-neutral-400 hover:bg-white/[0.07] hover:text-white",
                 )}
               >
                 <Icon name="back" size={16} /> Language
@@ -336,7 +376,7 @@ function Panel({
           onClick={() => setOpen((v) => !v)}
           aria-haspopup="menu"
           aria-expanded={open}
-          title={USER_NAME}
+          title={displayName}
           className={cn(
             "flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-white/[0.06]",
             open && "bg-white/[0.06]",
@@ -347,16 +387,16 @@ function Panel({
           )}
         >
           <span className="grid size-9 shrink-0 place-items-center rounded-full bg-white/10 text-sm font-medium text-white">
-            {USER_NAME[0]}
+            {initial}
           </span>
           <span className={cn("flex-1 truncate text-sm", lbl)}>
-            {USER_NAME}
+            {displayName}
           </span>
           <Icon
             name="chevron"
             size={16}
             className={cn(
-              "text-zinc-500 transition-transform duration-150",
+              "text-neutral-500 transition-transform duration-150",
               open ? "-rotate-90" : "rotate-90",
               lbl,
             )}
@@ -368,16 +408,11 @@ function Panel({
 }
 
 export const SiderBar = () => {
-  const pathname = usePathname();
   const [drawer, setDrawer] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const expanded = hovered || menuOpen;
   const [lang, setLang] = useState("English"); // shared by rail and drawer
-
-  useEffect(() => {
-    setDrawer(false);
-  }, [pathname]);
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => e.key === "Escape" && setDrawer(false);
@@ -476,7 +511,7 @@ export const SiderBar = () => {
             type="button"
             onClick={() => setDrawer(false)}
             aria-label="Close menu"
-            className="absolute right-3 top-3 grid size-8 place-items-center rounded-lg text-zinc-400 transition-colors hover:bg-white/[0.08] hover:text-white"
+            className="absolute right-3 top-3 grid size-8 place-items-center rounded-lg text-neutral-400 transition-colors hover:bg-white/[0.08] hover:text-white"
           >
             <Icon name="close" size={16} />
           </button>

@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 
 /* ---------------------------------- data ---------------------------------- */
 
-const MEMORY_HREF = "/settings#memory";
+const MEMORY_HREF = "/chat/settings#memory";
 const ASK_SANDO_HREF =
   "/chat?prompt=" +
   encodeURIComponent("I need help using Sando. Can you walk me through it?");
@@ -395,11 +395,7 @@ export default function HelpPage() {
               </Link>
             </div>
           ) : (
-            <Accordion
-              type="single"
-              collapsible
-              className="rounded-xl border border-border bg-card px-5"
-            >
+            <Accordion className="rounded-xl border border-border bg-card px-5">
               {results.map((f) => (
                 <AccordionItem key={f.q} value={f.q}>
                   <AccordionTrigger className="text-left">

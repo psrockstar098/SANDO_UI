@@ -222,6 +222,7 @@ export default function PluginsPage() {
                             setPerm((s) => ({ ...s, [p.id]: v }))
                           }
                           options={PERMS}
+                          label="Permission"
                         />
                       </div>
                     </div>

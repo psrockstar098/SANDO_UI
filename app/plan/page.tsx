@@ -23,6 +23,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Icon } from "@/components/Icon";
 import { PageShell } from "@/components/PageShell";
+import { useAuth } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
 
 type PlanId = "pekin" | "bigman" | "developer" | "enterprise";
@@ -39,14 +40,21 @@ type Plan = {
   audience: Audience;
 };
 
-// TODO: read from your Keycloak session / role (e.g. pro_subscriber). null = signed out.
-const viewer: { plan: PlanId | null } = { plan: "pekin" };
-
-// TODO: point at your billing portal route.
-const BILLING_HREF = "/settings#billing";
+// The signed-in plan comes from the `plan` token claim; null = signed out.
+const BILLING_HREF = "/chat/settings#billing";
 
 const YEARLY_DISCOUNT = 0.2;
 const PLAN_ORDER: PlanId[] = ["pekin", "bigman", "developer", "enterprise"];
+
+/** Maps a token plan claim ("pekin", "bigman", …) to a plan id. */
+function toPlanId(plan: string | undefined): PlanId | null {
+  if (!plan) return null;
+  const key = plan.toLowerCase();
+  const match = PLAN_ORDER.find((id) => id === key);
+  if (match) return match;
+  if (key === "big-man") return "bigman";
+  return null;
+}
 
 const plans: Plan[] = [
   {
@@ -162,12 +170,20 @@ const perMonth = (base: number, yearly: boolean) =>
 
 const pill = "w-full rounded-full";
 
-function PlanAction({ plan, yearly }: { plan: Plan; yearly: boolean }) {
+function PlanAction({
+  plan,
+  yearly,
+  currentPlan,
+}: {
+  plan: Plan;
+  yearly: boolean;
+  currentPlan: PlanId | null;
+}) {
   const variant = plan.popular ? "default" : "outline";
   const style = (extra?: string) =>
     cn(buttonVariants({ variant, size: "lg" }), pill, extra);
 
-  if (viewer.plan === plan.id) {
+  if (currentPlan === plan.id) {
     return (
       <Button variant="outline" size="lg" disabled className={pill}>
         Current plan
@@ -182,8 +198,8 @@ function PlanAction({ plan, yearly }: { plan: Plan; yearly: boolean }) {
     );
   }
   if (
-    viewer.plan &&
-    PLAN_ORDER.indexOf(plan.id) < PLAN_ORDER.indexOf(viewer.plan)
+    currentPlan &&
+    PLAN_ORDER.indexOf(plan.id) < PLAN_ORDER.indexOf(currentPlan)
   ) {
     return (
       <Link href={BILLING_HREF} className={style()}>
@@ -193,23 +209,31 @@ function PlanAction({ plan, yearly }: { plan: Plan; yearly: boolean }) {
   }
   if (plan.id === "pekin") {
     return (
-      <Link href="/signup" className={style()}>
+      <Link href="/chat" className={style()}>
         Sign up free
       </Link>
     );
   }
-  // Point this at your Stripe Checkout / billing portal route
+  // No checkout API yet: send people to the billing section of settings.
   return (
     <Link
-      href={`/api/checkout?plan=${plan.id}&billing=${yearly ? "yearly" : "monthly"}`}
+      href={`/chat/settings?plan=${plan.id}&billing=${yearly ? "yearly" : "monthly"}#billing`}
       className={style()}
     >
-      {viewer.plan ? `Upgrade to ${plan.name}` : `Get ${plan.name}`}
+      {currentPlan ? `Upgrade to ${plan.name}` : `Get ${plan.name}`}
     </Link>
   );
 }
 
-function PlanCard({ plan, yearly }: { plan: Plan; yearly: boolean }) {
+function PlanCard({
+  plan,
+  yearly,
+  currentPlan,
+}: {
+  plan: Plan;
+  yearly: boolean;
+  currentPlan: PlanId | null;
+}) {
   const price = plan.monthly === null ? null : perMonth(plan.monthly, yearly);
   const figure = "font-agd text-5xl leading-none";
 
@@ -262,13 +286,15 @@ function PlanCard({ plan, yearly }: { plan: Plan; yearly: boolean }) {
       </CardContent>
 
       <CardFooter>
-        <PlanAction plan={plan} yearly={yearly} />
+        <PlanAction plan={plan} yearly={yearly} currentPlan={currentPlan} />
       </CardFooter>
     </Card>
   );
 }
 
 export default function PlansPage() {
+  const { user } = useAuth();
+  const currentPlan = toPlanId(user?.plan);
   const [yearly, setYearly] = useState(false);
   const [audience, setAudience] = useState<Audience>("everyday");
   const shown = plans.filter((p) => p.audience === audience);
@@ -310,7 +336,7 @@ export default function PlansPage() {
 
       <div className="grid gap-4 md:grid-cols-2">
         {shown.map((p) => (
-          <PlanCard key={p.id} plan={p} yearly={yearly} />
+          <PlanCard key={p.id} plan={p} yearly={yearly} currentPlan={currentPlan} />
         ))}
       </div>
 
@@ -333,7 +359,7 @@ export default function PlansPage() {
                 {plans.map((p) => (
                   <TableHead key={p.id}>
                     {p.name}
-                    {viewer.plan === p.id && (
+                    {currentPlan === p.id && (
                       <span className="ml-2 text-xs font-normal text-muted-foreground">
                         Current
                       </span>
@@ -353,7 +379,7 @@ export default function PlansPage() {
                     return (
                       <TableCell
                         key={p.id}
-                        className={cn(viewer.plan === p.id && "bg-muted/50")}
+                        className={cn(currentPlan === p.id && "bg-muted/50")}
                       >
                         {value === NONE ? (
                           <>
