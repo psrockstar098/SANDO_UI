@@ -12,6 +12,7 @@
  */
 
 import { CHAT_TIMEOUT_MS, callBackend, callBackendStream, fail } from "@/lib/api/backend";
+import { extractReply } from "@/lib/api/reply";
 import { toPlainText } from "@/lib/format";
 
 type Turn = { role: "user" | "assistant"; content: string };
@@ -24,28 +25,6 @@ function isTurn(value: unknown): value is Turn {
     typeof t.content === "string" &&
     t.content.trim().length > 0
   );
-}
-
-/** Reads `response` and/or `choices[0].message.content` from the backend. */
-function extractReply(data: unknown): string | null {
-  if (typeof data === "string") return data.trim() || null;
-  if (!data || typeof data !== "object") return null;
-
-  const d = data as Record<string, unknown>;
-  for (const key of ["response", "reply", "answer", "content", "message"]) {
-    const v = d[key];
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-
-  const choices = d.choices;
-  if (Array.isArray(choices) && choices.length > 0) {
-    const first = choices[0] as Record<string, unknown> | undefined;
-    const message = first?.message as Record<string, unknown> | undefined;
-    const content = message?.content ?? first?.text;
-    if (typeof content === "string" && content.trim()) return content.trim();
-  }
-
-  return null;
 }
 
 export async function POST(request: Request) {

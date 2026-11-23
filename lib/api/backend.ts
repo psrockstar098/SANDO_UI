@@ -6,9 +6,22 @@
  * configurable and the browser never needs to know it.
  *
  * Backend contract (see the Zig server):
+ *   GET    /api/meta/liberia                       -> { counties, languages }   (public)
  *   POST   /api/chat          { messages, stream }  -> { response, dialect, choices }
+ *   POST   /api/chat/regenerate { collection? }     -> { response, dialect, choices }
+ *   POST   /api/chat/edit     { index, content }    -> { response, dialect, choices }
+ *   POST   /api/knowledge     { collection, ... }   -> { status, message }
  *   GET    /api/user                                -> { id, username, email, dialect, region }
+ *   PUT    /api/user/location { county }            -> { status, county, dialect }
+ *   PUT    /api/user/language { language }          -> { status, language, county }
  *   PUT    /api/user/dialect  { dialect, region }   -> { status, message }
+ *   PUT    /api/session/prompt { persona?, human? } -> { status, message }
+ *   POST   /api/session/remember { fact }           -> { status, message }
+ *   POST   /api/session/import { persona?, human?, history? } -> { status, message }
+ *   GET    /api/session/export                      -> { persona, human, history, ... }
+ *   DELETE /api/session/messages { from_index }     -> { status, message }
+ *   DELETE /api/session/history                     -> { status, message }
+ *   DELETE /api/session                             -> { status, message }
  *   DELETE /api/user                                -> { status, message }
  *
  * The backend answers 401 without a valid bearer token and 429 when the caller
@@ -34,6 +47,67 @@ function backendUrl(): string {
 
 export function fail(error: string, status: number) {
   return Response.json({ error }, { status });
+}
+
+export type JsonObject = Record<string, unknown>;
+
+export type JsonBodyResult =
+  | { ok: true; value: JsonObject }
+  | { ok: false; error: string };
+
+/**
+ * Reads the request body as a JSON object.
+ *
+ * `allowEmpty` is for endpoints whose payload is optional (`{}` is then a
+ * valid body); everything else rejects a missing body like malformed JSON.
+ */
+export async function readJsonObject(
+  request: Request,
+  { allowEmpty = false }: { allowEmpty?: boolean } = {},
+): Promise<JsonBodyResult> {
+  let text: string;
+  try {
+    text = await request.text();
+  } catch {
+    return { ok: false, error: "The request body must be valid JSON." };
+  }
+
+  if (!text.trim()) {
+    return allowEmpty
+      ? { ok: true, value: {} }
+      : { ok: false, error: "The request body must be valid JSON." };
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { ok: false, error: "The request body must be a JSON object." };
+    }
+    return { ok: true, value: parsed as JsonObject };
+  } catch {
+    return { ok: false, error: "The request body must be valid JSON." };
+  }
+}
+
+/** Trims a required string field; rejects empty, wrong-type, or over-long values. */
+export function cleanString(value: unknown, maxLength = 256): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text || text.length > maxLength) return null;
+  return text;
+}
+
+/**
+ * Trims an optional string field. `undefined` means the key was absent,
+ * `null` means it was present but not a string or too long.
+ */
+export function optionalString(
+  value: unknown,
+  maxLength = 20_000,
+): string | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length > maxLength) return null;
+  return value.trim();
 }
 
 /** The backend reports failures as `{ error }`; accept a plain string too. */
