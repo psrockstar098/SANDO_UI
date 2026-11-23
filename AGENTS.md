@@ -29,9 +29,10 @@ Before the final response, run one reporting pass. If candidates remain, from th
 
 <!-- END:nextjs-agent-feedback -->
 
-## Design: monochrome only
+## Monochrome only
 
-Only black, white, `neutral-*`, and `currentColor` are allowed. Any new
-color must be expressed as a black/white mix. OpenUI tokens are generated
-to grayscale by `scripts/generate-openui-theme.mjs`; do not add colored
-tokens by hand.
+Only black, white, `neutral-*`, and `currentColor` are allowed. Any new color
+must be expressed as a black/white mix. A2UI components are implemented with
+monochrome Tailwind classes in `components/chat/A2UIAnswer.tsx`; do not add
+colored tokens by hand, and never import basic-catalog styles
+(`injectBasicCatalogStyles`) — the Sando catalog carries its own components.

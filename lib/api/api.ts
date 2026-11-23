@@ -1,4 +1,9 @@
-import { decodeFrameBytes, parseOpenUIFrame } from "@/lib/chat/openui";
+import {
+  decodeFrameBytes,
+  isA2UIMessage,
+  parseA2UIFrame,
+} from "@/lib/chat/a2ui";
+import type { AgentToRendererMessage } from "@a2ui/web_core/v1_0";
 
 /* ------------------------------------------------------------------ */
 /* Config                                                              */
@@ -32,7 +37,6 @@ export interface SendPromptParams {
   token: string | null;
   signal?: AbortSignal;
   timeoutMs?: number;
-  /** "ui" asks the backend to answer as OpenUI Lang; default "text". */
   mode?: "text" | "ui";
 }
 
@@ -271,15 +275,17 @@ export async function deleteAccount({
 }
 
 /* ------------------------------------------------------------------ */
-/* Streaming (OpenUI mode)                                             */
+/* Streaming (A2UI mode)                                               */
 /* ------------------------------------------------------------------ */
 
 export interface StreamPromptParams extends SendPromptParams {
   mode: "ui";
-  onToken: (chunk: string) => void;
+  /** One complete A2UI wire message per call, in stream order. */
+  onMessage: (message: AgentToRendererMessage) => void;
 }
 
 export interface StreamChatResponse {
+  /** The wire log: one A2UI message JSON object per line. */
   reply: string;
   mode: "ui";
 }
@@ -289,19 +295,21 @@ type ApiErrorWithPartial = ApiError & { partial?: string };
 /**
  * Streams a UI-mode answer from `/api/chat` as base64 NDJSON frames.
  *
- * `onToken` receives each decoded chunk as it arrives. When the backend
- * reports an error mid-stream, or the connection fails after tokens, the
- * thrown `ApiError` carries the accumulated reply as `partial` so the caller
- * can keep it. The caller's `signal` aborts the reader; that abort is
- * rethrown as-is. No internal timeout: a generation may legitimately run
- * long, and the caller owns cancellation.
+ * Each decoded frame is one complete A2UI wire message. `onMessage` receives
+ * it parsed and validated; the returned `reply` is the wire log (one message
+ * per line) for storage. When the backend reports an error mid-stream, or the
+ * connection fails after messages, the thrown `ApiError` carries the
+ * accumulated log as `partial` so the caller can keep it. The caller's
+ * `signal` aborts the reader; that abort is rethrown as-is. No internal
+ * timeout: a generation may legitimately run long, and the caller owns
+ * cancellation.
  */
 export async function streamPrompt({
   prompt,
   history = [],
   token,
   signal,
-  onToken,
+  onMessage,
 }: StreamPromptParams): Promise<StreamChatResponse> {
   const text = prompt.trim();
   if (!text) throw new ApiError("Prompt is empty.", 400);
@@ -365,15 +373,33 @@ export async function streamPrompt({
 
   /** Handles one complete NDJSON line; returns true when the stream ends. */
   const handleLine = (line: string): boolean => {
-    const frame = parseOpenUIFrame(line);
+    const frame = parseA2UIFrame(line);
     if (!frame) return false;
     if (frame.error !== undefined) {
       throw withPartial(new ApiError(frame.error, 502));
     }
     if (frame.d !== undefined) {
-      const chunk = payload.decode(decodeFrameBytes(frame.d), { stream: true });
-      reply += chunk;
-      onToken(chunk);
+      const decoded = payload.decode(decodeFrameBytes(frame.d), {
+        stream: true,
+      });
+      let message: unknown;
+      try {
+        message = JSON.parse(decoded);
+      } catch {
+        throw withPartial(
+          new ApiError(`Malformed A2UI message: ${decoded.slice(0, 120)}`, 502),
+        );
+      }
+      if (!isA2UIMessage(message)) {
+        throw withPartial(
+          new ApiError(
+            `Not an A2UI v1.0 message: ${decoded.slice(0, 120)}`,
+            502,
+          ),
+        );
+      }
+      reply += `${JSON.stringify(message)}\n`;
+      onMessage(message);
     }
     return frame.done === true;
   };
@@ -394,7 +420,7 @@ export async function streamPrompt({
     // process any trailing line, then return what arrived.
     buffer += wire.decode();
     if (buffer.trim()) handleLine(buffer);
-    reply += payload.decode();
+    payload.decode();
     return { reply, mode: "ui" };
   } catch (err) {
     if (err instanceof ApiError) throw err;

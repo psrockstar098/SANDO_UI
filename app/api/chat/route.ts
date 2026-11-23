@@ -1,16 +1,14 @@
 /**
  * Server-side proxy for chat.
  *
- *   POST /api/chat  { messages, mode?, stream? }
- *   -> 200 { reply, mode }                          (non-streaming)
- *   -> 200 application/x-ndjson                     (streaming, mode "ui" only)
- *   -> 4xx/5xx { error }
+ *   POST /api/chat  { messages: [{ role, content }], mode?: "text" | "ui", stream?: boolean }
+ *   -> 200 { reply: string, mode: "text" | "ui" }
+ *   -> 200 (streaming, ui mode only) application/x-ndjson frames
+ *   -> 4xx/5xx { error: string }
  *
  * The backend answers with `{ response, dialect, choices }`; the UI only needs
- * the text, so it is flattened to `{ reply }` here. In UI mode the reply is
- * OpenUI Lang and is passed through untouched — `toPlainText` applies to
- * text mode only. Streaming forwards the backend's base64 NDJSON frames
- * unchanged; the browser decodes them (see `lib/chat/openui.ts`).
+ * the text, so it is flattened to `{ reply }` here. In ui mode the reply is
+ * the A2UI wire log and is passed through untouched — never plain-texted.
  */
 
 import { CHAT_TIMEOUT_MS, callBackend, callBackendStream, fail } from "@/lib/api/backend";
@@ -72,28 +70,23 @@ export async function POST(request: Request) {
   }
 
   const mode = payload.mode === "ui" ? "ui" : "text";
-  const stream = payload.stream === true;
+  const stream = payload.stream === true && mode === "ui";
 
   if (stream) {
-    if (mode !== "ui") {
-      return fail('streaming is only supported for mode "ui".', 400);
+    const upstream = await callBackendStream(
+      "/api/chat",
+      request,
+      { messages, mode, stream: true },
+      CHAT_TIMEOUT_MS,
+    );
+    if (!upstream.ok) {
+      return fail(upstream.error, upstream.status);
     }
-
-    const result = await callBackendStream("/api/chat", request, {
-      messages,
-      mode,
-      stream: true,
-    });
-
-    if (!result.ok) {
-      return fail(result.error, result.status);
-    }
-
-    return new Response(result.body, {
+    return new Response(upstream.body, {
       headers: {
-        "content-type": "application/x-ndjson; charset=utf-8",
-        "cache-control": "no-store",
-        "x-accel-buffering": "no",
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
       },
     });
   }
@@ -113,8 +106,11 @@ export async function POST(request: Request) {
     return fail("Sando returned an empty response.", 502);
   }
 
-  return Response.json({
-    reply: mode === "ui" ? rawReply : toPlainText(rawReply),
-    mode,
-  });
+  // Ui mode returns the wire log as-is, so the client can restore the
+  // interactive components exactly. Never convert it to plain text.
+  if (mode === "ui") {
+    return Response.json({ reply: rawReply, mode: "ui" });
+  }
+
+  return Response.json({ reply: toPlainText(rawReply), mode: "text" });
 }

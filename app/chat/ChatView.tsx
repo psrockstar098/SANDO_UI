@@ -10,10 +10,10 @@ import { useConversationMessages } from "@/hooks/useConversation";
 import {
   errorMessage,
   isAbortError,
-  sendPrompt,
   streamPrompt,
   type ChatTurn,
 } from "@/lib/api/api";
+import { looksLikeA2UI } from "@/lib/chat/a2ui";
 import {
   createConversation,
   getConversation,
@@ -21,6 +21,12 @@ import {
   saveConversation,
   type StoredMessage,
 } from "@/lib/chat/store";
+
+// @a2ui/react hosts implementations as custom elements, which need a DOM:
+// the surface module must never be prerendered on the server.
+const A2UIAnswer = dynamic(() => import("@/components/chat/A2UIAnswer"), {
+  ssr: false,
+});
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -34,34 +40,6 @@ const suggestions = [
   "Translate a sentence for me",
   "Quiz me on Gio vocabulary",
 ];
-
-// The OpenUI library only runs in the browser; keep it out of SSR entirely.
-const OpenUIAnswer = dynamic(() => import("@/components/chat/OpenUIAnswer"), {
-  ssr: false,
-});
-
-/** True when the text starts a plausible OpenUI Lang program. */
-function looksLikeOpenUI(code: string): boolean {
-  return /^\s*(root|[A-Za-z_][A-Za-z0-9_]*)\s*=/m.test(code);
-}
-
-/** True once the text contains an OpenUI Lang assignment statement. */
-function hasAssignment(code: string): boolean {
-  return /(^|\n)\s*(root|[A-Za-z_][A-Za-z0-9_]*)\s*=/.test(code);
-}
-
-function assistantMessage(
-  content: string,
-  kind: "text" | "openui",
-): Message {
-  return {
-    id: crypto.randomUUID(),
-    role: "assistant",
-    content,
-    createdAt: Date.now(),
-    kind,
-  };
-}
 
 /* ------------------------------------------------------------------ */
 /* Small pieces                                                        */
@@ -96,22 +74,26 @@ function StopIcon() {
 
 function Bubble({
   message,
-  onFollowUp,
   onStateUpdate,
+  onFollowUp,
 }: {
   message: Message;
-  onFollowUp: (prompt: string) => void;
   onStateUpdate: (id: string, state: Record<string, unknown>) => void;
+  onFollowUp: (text: string) => void;
 }) {
   const mine = message.role === "user";
-  if (!mine && message.kind === "openui") {
+  if (!mine && message.kind === "a2ui") {
     return (
-      <OpenUIAnswer
-        code={message.content}
-        state={message.uiState}
-        onStateUpdate={(state) => onStateUpdate(message.id, state)}
-        onFollowUp={onFollowUp}
-      />
+      <div className="flex justify-start">
+        <div className="w-full max-w-[85%] md:max-w-[70%]">
+          <A2UIAnswer
+            messages={message.content}
+            state={message.uiState}
+            onStateUpdate={(state) => onStateUpdate(message.id, state)}
+            onFollowUp={onFollowUp}
+          />
+        </div>
+      </div>
     );
   }
   return (
@@ -168,12 +150,12 @@ function Chat({ routeId }: { routeId: string | null }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** Live streaming answer; written to the store when it ends. */
-  const [draft, setDraft] = useState<{ id: string; content: string } | null>(
-    null,
-  );
   /** Conversation the in-flight reply belongs to (null when idle). */
   const [pendingId, setPendingId] = useState<string | null>(null);
+  /** The wire log of the reply currently streaming (null when idle). */
+  const [draft, setDraft] = useState<string | null>(null);
+  /** Latest form state of the streaming reply, attached when it is saved. */
+  const draftState = useRef<Record<string, unknown> | undefined>(undefined);
 
   const bottom = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
@@ -197,9 +179,15 @@ function Chat({ routeId }: { routeId: string | null }) {
       setConversationId(routeId);
       setInput("");
       setError(null);
+      setDraft(null);
       setLoading(pendingId !== null && pendingId === routeId);
     }
   }
+
+  // A conversation switch abandons any in-flight draft form state.
+  useEffect(() => {
+    draftState.current = undefined;
+  }, [routeId]);
 
   // Note: URL changes remount this view in this app, so a reply must never be
   // cancelled by an unmount — it is written to the store and picked up again.
@@ -207,7 +195,7 @@ function Chat({ routeId }: { routeId: string | null }) {
   // Keep the newest message in view
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, loading, draft?.content]);
+  }, [messages, loading, draft]);
 
   // Auto-grow the textarea (max ~6 lines)
   useEffect(() => {
@@ -221,10 +209,27 @@ function Chat({ routeId }: { routeId: string | null }) {
     abortRef.current?.abort();
     abortRef.current = null;
     setLoading(false);
+    setDraft(null);
+    draftState.current = undefined;
   }, []);
 
+  /** Persists a saved message's A2UI form state after the user changes it. */
+  const handleStateUpdate = useCallback(
+    (id: string, state: Record<string, unknown>) => {
+      const convId = activeId.current;
+      if (!convId) return;
+      const conv = getConversation(convId);
+      if (!conv) return;
+      saveConversation(
+        convId,
+        conv.messages.map((m) => (m.id === id ? { ...m, uiState: state } : m)),
+      );
+    },
+    [],
+  );
+
   const send = useCallback(
-    async (text: string, mode: "text" | "ui" = "ui") => {
+    async (text: string) => {
       const content = text.trim();
       if (!content || loading) return;
 
@@ -249,14 +254,12 @@ function Chat({ routeId }: { routeId: string | null }) {
       setInput("");
       setError(null);
       setLoading(true);
+      setDraft("");
+      draftState.current = undefined;
 
       const controller = new AbortController();
       abortRef.current = controller;
       setPendingId(id);
-
-      // Accumulated stream text, kept outside `try` so `catch` can save the
-      // partial answer without reading stale state from the closure.
-      let streamed = "";
 
       try {
         const token = await getToken();
@@ -264,96 +267,61 @@ function Chat({ routeId }: { routeId: string | null }) {
           .slice(0, -1)
           .map(({ role, content: c }) => ({ role, content: c }));
 
-        if (mode === "text") {
-          const { reply } = await sendPrompt({
-            prompt: content,
-            history,
-            token,
-            signal: controller.signal,
-            mode,
-          });
-          // Persists to the store either way; the view follows the store.
-          saveConversation(id, [...next, assistantMessage(reply, "text")]);
-          return;
-        }
-
-        const draftId = crypto.randomUUID();
-        setDraft({ id: draftId, content: "" });
+        let log = "";
         const { reply } = await streamPrompt({
           prompt: content,
           history,
           token,
-          mode: "ui",
           signal: controller.signal,
-          onToken: (chunk) => {
-            streamed += chunk;
-            setDraft((d) =>
-              d ? { ...d, content: d.content + chunk } : d,
-            );
+          mode: "ui",
+          onMessage: (message) => {
+            log += `${JSON.stringify(message)}\n`;
+            setDraft(log);
           },
         });
 
-        // A UI-mode reply that is not a program is prose: store it as text
-        // so it renders as a normal bubble instead of an empty box.
-        const kind = looksLikeOpenUI(reply) ? "openui" : "text";
+        const answer: Message = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: reply,
+          createdAt: Date.now(),
+          kind: looksLikeA2UI(reply) ? "a2ui" : "text",
+          uiState: draftState.current,
+        };
+        const updated = [...next, answer];
         // Persists to the store either way; the view follows the store.
-        saveConversation(id, [...next, assistantMessage(reply, kind)]);
+        saveConversation(id, updated);
       } catch (err) {
-        if (isAbortError(err)) {
-          // Stop keeps the partial answer when there is one.
-          if (streamed.trim()) {
-            const kind = looksLikeOpenUI(streamed) ? "openui" : "text";
-            saveConversation(id, [
-              ...next,
-              assistantMessage(streamed, kind),
-            ]);
-          }
-        } else {
-          // A mid-stream failure keeps the partial answer and shows the
-          // error text below it.
-          const partial = (err as { partial?: string }).partial;
-          if (partial && partial.trim()) {
-            const kind = looksLikeOpenUI(partial) ? "openui" : "text";
-            saveConversation(id, [
-              ...next,
-              assistantMessage(partial, kind),
-            ]);
-          }
-          if (activeId.current === id) {
-            setError(errorMessage(err));
-          }
+        // A mid-stream failure keeps what arrived, so the user still sees it.
+        const partial = (err as { partial?: unknown } | null)?.partial;
+        if (
+          typeof partial === "string" &&
+          partial.trim() &&
+          !isAbortError(err)
+        ) {
+          const answer: Message = {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: partial,
+            createdAt: Date.now(),
+            kind: looksLikeA2UI(partial) ? "a2ui" : "text",
+            uiState: draftState.current,
+          };
+          saveConversation(id, [...next, answer]);
+        }
+        if (!isAbortError(err) && activeId.current === id) {
+          setError(errorMessage(err));
         }
       } finally {
-        setDraft(null);
         setPendingId(null);
         if (abortRef.current === controller) abortRef.current = null;
         setLoading(false);
+        setDraft(null);
+        draftState.current = undefined;
         box.current?.focus();
       }
     },
     [conversationId, messages, loading, getToken],
-  );
-
-  const onFollowUp = useCallback(
-    (prompt: string) => {
-      void send(prompt);
-    },
-    [send],
-  );
-
-  /** Persists an in-answer form's state on its stored message. */
-  const onStateUpdate = useCallback(
-    (id: string, state: Record<string, unknown>) => {
-      const cid = conversationId;
-      if (!cid) return;
-      const convo = getConversation(cid);
-      if (!convo) return;
-      saveConversation(
-        cid,
-        convo.messages.map((m) => (m.id === id ? { ...m, uiState: state } : m)),
-      );
-    },
-    [conversationId],
   );
 
   // "Ask Sando" from Help lands here with ?prompt=… — send each prompt once.
@@ -428,25 +396,34 @@ function Chat({ routeId }: { routeId: string | null }) {
               <Bubble
                 key={m.id}
                 message={m}
-                onFollowUp={onFollowUp}
-                onStateUpdate={onStateUpdate}
+                onStateUpdate={handleStateUpdate}
+                onFollowUp={send}
               />
             ))}
-            {draft &&
-              (hasAssignment(draft.content) ? (
-                <OpenUIAnswer
-                  code={draft.content}
-                  isStreaming
-                  onFollowUp={(prompt) => void send(prompt)}
-                />
+            {draft !== null && draft.length > 0 ? (
+              looksLikeA2UI(draft) ? (
+                <div className="flex justify-start">
+                  <div className="w-full max-w-[85%] md:max-w-[70%]">
+                    <A2UIAnswer
+                      messages={draft}
+                      isStreaming
+                      onStateUpdate={(state) => {
+                        draftState.current = state;
+                      }}
+                      onFollowUp={send}
+                    />
+                  </div>
+                </div>
               ) : (
                 <div className="flex justify-start">
                   <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-md bg-white/[0.07] px-4 py-2.5 text-sm leading-relaxed text-neutral-100 md:max-w-[70%]">
-                    {draft.content}
+                    {toPlainText(draft)}
                   </div>
                 </div>
-              ))}
-            {loading && !draft && <TypingBubble />}
+              )
+            ) : (
+              loading && <TypingBubble />
+            )}
             {error && (
               <p role="alert" className="text-center text-xs text-neutral-300">
                 {error}

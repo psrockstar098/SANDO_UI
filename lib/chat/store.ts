@@ -8,16 +8,16 @@
 
 export type ChatRole = "user" | "assistant";
 
-export type ChatKind = "text" | "openui";
+export type ChatKind = "text" | "a2ui";
 
 export interface StoredMessage {
   id: string;
   role: ChatRole;
   content: string;
   createdAt: number;
-  /** Absent means "text", so messages stored before OpenUI still load. */
+  /** Absent means "text", so messages stored before A2UI still load. */
   kind?: ChatKind;
-  /** OpenUI form state, persisted with the message. */
+  /** A2UI data-model snapshot (form state), persisted with the message. */
   uiState?: Record<string, unknown>;
 }
 
@@ -59,7 +59,7 @@ function isMessage(value: unknown): value is StoredMessage {
     (m.role === "user" || m.role === "assistant") &&
     typeof m.content === "string" &&
     typeof m.createdAt === "number" &&
-    (m.kind === undefined || m.kind === "text" || m.kind === "openui") &&
+    (m.kind === undefined || m.kind === "text" || m.kind === "a2ui") &&
     (m.uiState === undefined ||
       (typeof m.uiState === "object" && m.uiState !== null))
   );

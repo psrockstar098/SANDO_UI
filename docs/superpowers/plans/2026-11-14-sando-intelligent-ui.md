@@ -2,34 +2,38 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace Sando's plain-text answer bubbles with OpenUI intelligent answers that stream and render as interactive UI, without changing the existing app shell, authentication, or black-and-white design.
+**Goal:** Replace Sando's plain-text answer bubbles with A2UI intelligent answers that stream and render as interactive UI, without changing the existing app shell, authentication, or black-and-white design.
 
-**Architecture:** The browser keeps talking to Next route handlers, which forward the Keycloak bearer token to the Zig backend. The Zig backend gains a `mode: "ui"` that appends the generated OpenUI Lang specification to Sando's existing system prompt, and a streaming path that emits base64-framed NDJSON deltas. The Next `/api/chat` route proxies those frames unchanged. On the client, a small `OpenUIAnswer` component renders the returned OpenUI Lang with `Renderer` and the prebuilt `openuiLibrary`, while user messages, legacy assistant messages, and errors keep the current plain-text bubbles.
+**Architecture:** The browser keeps talking to Next route handlers, which forward the Keycloak bearer token to the Zig backend. The Zig backend gains a `mode: "ui"` that appends the generated A2UI catalog and wire-format instructions to Sando's existing system prompt, and a streaming path that emits base64-framed NDJSON deltas, one complete A2UI v1.0 message per frame. The Next `/api/chat` route proxies those frames unchanged. On the client, a small `A2UIAnswer` component renders the returned messages with `A2uiSurface` from `@a2ui/react` and a `MessageProcessor` from `@a2ui/web_core` fed only the Sando catalog, while user messages, legacy assistant messages, and errors keep the current plain-text bubbles.
 
-**Tech Stack:** Next.js 16.4.4 (App Router, cacheComponents), React 19.3, TypeScript 5, Tailwind CSS 4, `@openuidev/react-lang@1.0.0`, `@openuidev/react-ui@0.18.1`, `zod@^4`, Zig 0.17 backend (`std.http.Server`, `std.http.Client`).
+**Tech Stack:** Next.js 16.4.4 (App Router, cacheComponents), React 19.3, TypeScript 5, Tailwind CSS 4, `@a2ui/react@0.15.0`, `@a2ui/web_core@0.15.0`, `zod@3.25.76`, Zig 0.17 backend (`std.http.Server`, `std.http.Client`).
 
 **Spec:** `docs/superpowers/specs/2026-11-14-sando-intelligent-ui.md`
+**Contract doc:** `docs/a2ui.md`
+
+**Status (2026-11-23, A2UI swap):** Tasks 1, 3, 4, 6, 7 (Next-side parts), and 8 are implemented in this repo. Tasks 2 and 5 — the Zig backend `mode: "ui"` emission and streaming — are still open and live on Dominic's laptop in `/home/psrockstar/Documents/code/sando`. Live checks needing the backend + Keycloak cannot run on this VM.
 
 ## Global Constraints
 
 - Every request except `GET /health` and `OPTIONS` requires a Keycloak bearer token. The browser sends it only to Next; Next forwards it server-side.
-- No new color tokens. Every OpenUI `--openui-*` variable with chroma > 0 becomes chroma 0. No Tailwind color utility outside `black`, `white`, `neutral-*`, `transparent`, and `currentColor`.
+- No new color tokens. A2UI components are implemented with monochrome Tailwind classes only: `black`, `white`, `neutral-*`, `transparent`, `currentColor`. Never import basic-catalog styles (`injectBasicCatalogStyles`); there is no theme generator.
 - Assistant display names never use an email address. Use `getDisplayName()` from `lib/format.ts`.
-- `toPlainText()` is applied to `mode: "text"` replies only. Never to OpenUI Lang.
+- `toPlainText()` is applied to `mode: "text"` replies only. Never to the A2UI wire log.
 - Conversations stay in `localStorage` under `sando:conversations:v1`. Old stored messages must keep working without migration.
 - Backend: `127.0.0.1:22323`. UI dev server: `http://localhost:3000`.
-- OpenUI packages are pinned exactly: `@openuidev/react-lang@1.0.0`, `@openuidev/react-ui@0.18.1`, `@openuidev/react-headless@0.18.8`. Do not use `^`.
-- OpenUI CSS must load before `globals.css` so the generated monochrome overrides win on equal specificity.
+- A2UI packages are pinned exactly: `@a2ui/react@0.15.0`, `@a2ui/web_core@0.15.0`, `zod@3.25.76`. Do not use `^`.
 - No `export const dynamic` or `export const runtime` in route files; `cacheComponents` rejects them. `maxDuration` is allowed but not needed here.
-- The generated OpenUI spec is committed. Do not generate it during `next build`.
+- The generated catalog JSON is committed. Do not generate it during `next build`.
+- The React renderer is the only renderer. Never import `@a2ui/lit` as a renderer.
 
 ## Review Focus
 
-- **Model returns prose instead of OpenUI Lang.** The user must see the prose answer, not a blank box or a parser error. `OpenUIAnswer` falls back to a plain-text bubble when the parse result has no renderable root.
-- **Model returns a partial program during streaming.** The renderer must show what is valid so far and finish in place, without remounting the conversation or losing scroll position.
-- **A component emits `@OpenUrl` with a `javascript:` or `data:` URL.** Only `http:` and `https:` open, in a new tab with `noopener,noreferrer`. Everything else is ignored.
-- **A user submits an in-answer form, then reloads.** The form state must survive because it is persisted on the stored assistant message, not held only in React state.
+- **Model returns prose instead of A2UI messages.** The user must see the prose answer, not a blank box or a parser error. `A2UIAnswer` falls back to plain text when the wire log has no renderable surface, and `ChatView` stores prose as `kind: "text"`.
+- **Model returns a partial message during streaming.** Each frame is one complete message, so the renderer only ever sees whole messages; it shows what is valid so far and finishes in place, without remounting the conversation or losing scroll position.
+- **A component emits `openUrl` with a `javascript:` or `data:` URL.** Only `http:` and `https:` open, in a new tab with `noopener,noreferrer`. Everything else is ignored.
+- **A user submits an in-answer form, then reloads.** The form state must survive because it is persisted on the stored assistant message (`uiState`), not held only in React state.
 - **Upstream fails before or during the stream.** Before headers, the route returns the normal JSON error shape. After headers, the client shows the partial answer plus an inline error and never leaves the composer stuck in `loading`.
+- **A surface module is imported during SSR.** `@a2ui/react` hosts implementations as custom elements, which need a DOM. `A2UIAnswer` is always loaded with `next/dynamic(..., { ssr: false })`; importing it statically breaks the prerender with `ReferenceError: HTMLElement is not defined`.
 
 ---
 
@@ -37,43 +41,44 @@
 
 **Create**
 
-- `scripts/generate-openui-prompt.mjs` — builds the OpenUI system prompt and writes the Zig spec file.
-- `scripts/generate-openui-theme.mjs` — rewrites every colored `--openui-*` token to grayscale.
-- `app/openui-monochrome.css` — generated grayscale token overrides (committed).
-- `components/chat/OpenUIAnswer.tsx` — the only component that imports the OpenUI renderer.
-- `lib/chat/openui.ts` — pure helpers: URL sanitizing, action mapping, NDJSON frame decoding.
+- `scripts/generate-a2ui-catalog.mjs` — builds the Sando catalog JSON from the basic catalog's component/function shapes.
+- `lib/chat/catalog.json` — generated Sando catalog (committed).
+- `components/chat/A2UIAnswer.tsx` — the only component that imports the A2UI renderer.
+- `lib/chat/a2ui.ts` — pure helpers: URL sanitizing, wire-message parsing, NDJSON frame decoding, catalog loading.
+- `docs/a2ui.md` — the contract doc (replaces the old `docs/openui.md`).
 
 **Modify**
 
-- `package.json` — add the three OpenUI packages, `zod`, and two scripts.
-- `app/layout.tsx` — import the OpenUI stylesheet before `globals.css`.
-- `app/globals.css` — import the generated monochrome override after the OpenUI stylesheet.
+- `package.json` — add the two A2UI packages and `zod`, plus the catalog script.
 - `lib/chat/store.ts` — add optional `kind` and `uiState` to `StoredMessage`.
-- `app/chat/ChatView.tsx` — render OpenUI answers, keep a live streaming draft, add pre-stream error handling.
+- `app/chat/ChatView.tsx` — render A2UI answers, keep a live streaming draft, add pre-stream error handling.
 - `lib/api/api.ts` — add `mode` to `sendPrompt`, add `streamPrompt`.
 - `lib/api/backend.ts` — add `callBackendStream`.
 - `app/api/chat/route.ts` — pass `mode`, stream NDJSON, skip `toPlainText` for `ui`.
+- `AGENTS.md` — the monochrome rule, with A2UI wording.
 - Zig `/home/psrockstar/Documents/code/sando/src/server.zig` — `mode`, `format`, streaming response.
 - Zig `/home/psrockstar/Documents/code/sando/src/connnector/glue.zig` — `ui_mode`, `on_token_sink`, UI prompt override, cache key.
 - Zig `/home/psrockstar/Documents/code/sando/src/ai/ai.zig` — `TokenSink`, `chatStreaming`, incremental SSE parse.
 
 **Generated / committed**
 
-- Zig `/home/psrockstar/Documents/code/sando/src/connnector/openui_spec.zig`.
+- `lib/chat/catalog.json`.
+- Zig `/home/psrockstar/Documents/code/sando/src/connnector/a2ui_spec.zig`.
 
 ---
 
-## Task 1: Install OpenUI and Build a Monochrome Token Theme
+## Task 1: Install A2UI and Build the Sando Catalog
+
+**Status:** Done in the A2UI swap.
 
 **Files:**
 - Modify: `package.json`
-- Create: `scripts/generate-openui-theme.mjs`
-- Create: `app/openui-monochrome.css` (generated)
-- Modify: `app/layout.tsx`
-- Modify: `app/globals.css`
+- Create: `scripts/generate-a2ui-catalog.mjs`
+- Create: `lib/chat/catalog.json` (generated)
+- Create: `lib/chat/a2ui.ts`
 
 **Interfaces:**
-- Produces: `openuiLibrary` importable from `@openuidev/react-ui/genui-lib`; `app/openui-monochrome.css` loaded globally with all chroma at 0.
+- Produces: `lib/chat/catalog.json` with id `https://sando.app/catalogs/chat/v1/catalog.json`, protocolVersion `1.0`, 9 components (Text, Button, Card, Column, Row, List, Divider, TextField, ChoicePicker) and 14 functions.
 - Consumes: nothing from earlier tasks.
 
 - [ ] **Step 1: Install the pinned packages**
@@ -81,78 +86,75 @@
 Run:
 
 ```bash
-cd /home/psrockstar/Documents/code/sando_frontend/sando_ui
-bun add --exact @openuidev/react-lang@1.0.0 @openuidev/react-ui@0.18.1 @openuidev/react-headless@0.18.8
-bun add zod@^4
+bun add --exact @a2ui/react@0.15.0 @a2ui/web_core@0.15.0 zod@3.25.76
 ```
 
-Expected: `package.json` lists the three packages with exact versions and `zod` under dependencies. `bun.lock` (or lockfile present in the repo) updates. If the repo uses a different lockfile, use the package manager that produced it.
+Expected: `package.json` lists the three packages with exact versions under dependencies. `bun.lock` updates.
 
-- [ ] **Step 2: Verify the library and prompt are importable**
+- [ ] **Step 2: Write the catalog generator**
+
+Create `scripts/generate-a2ui-catalog.mjs`. It must:
+
+1. Import `basicCatalog` from `@a2ui/web_core/catalogs/basic/v1`.
+2. Derive the Sando catalog with `basicCatalog.derive({ catalogId: "https://sando.app/catalogs/chat/v1/catalog.json", components: ["Text", "Button", "Card", "Column", "Row", "List", "Divider", "TextField", "ChoicePicker"], functions: [the 14 basic functions] })`.
+3. Write the derived catalog's JSON to `lib/chat/catalog.json`.
+4. Print the component and function counts.
+
+The derived catalog carries the component/function shapes only; Sando implements the components itself in `A2UIAnswer.tsx`, so no basic-catalog styling is ever loaded.
+
+- [ ] **Step 3: Run the generator and prove the output**
 
 Run:
 
 ```bash
-node -e 'import("@openuidev/react-ui/genui-lib").then(m=>{console.log(Object.keys(m.openuiLibrary.components).length, m.openuiLibrary.root)})'
-```
-
-Expected: `82 Stack`
-
-- [ ] **Step 3: Write the theme generator**
-
-Create `scripts/generate-openui-theme.mjs`. It must:
-
-1. Read `node_modules/@openuidev/react-ui/dist/styles/index.css`.
-2. Scan declarations in file order into a map of `--openui-<name>` → value. Later declarations overwrite earlier ones, which picks the dark-theme values (the light `:root` block comes first, then the `prefers-color-scheme: dark` block, then `:root[data-openui-theme=dark]`).
-3. Keep only values that contain `oklch(`. Assert that no kept value contains `rgb(`, `hsl(`, or `#`; if one does, print `UNSUPPORTED <name> <value>` to stderr and exit non-zero. Non-color tokens (fonts, radii, spacing) are skipped.
-4. For each kept `oklch(L C H / A)` or `oklch(L C H)` value, replace `C` with `0`, keeping `L`, `H`, and `A`.
-5. Emit `app/openui-monochrome.css` with this exact header and selectors:
-
-```css
-/* Generated by scripts/generate-openui-theme.mjs. Do not edit by hand. */
-:root,
-:root:not([data-openui-theme="light"]),
-:root[data-openui-theme="dark"] {
-  /* one declaration per line, sorted by variable name */
-}
-```
-
-6. Print `wrote app/openui-monochrome.css (<n> tokens)`.
-
-- [ ] **Step 4: Run the generator and prove the output is grayscale**
-
-Run:
-
-```bash
-node scripts/generate-openui-theme.mjs
+node scripts/generate-a2ui-catalog.mjs
 node -e '
-const fs=require("fs");
-const css=fs.readFileSync("app/openui-monochrome.css","utf8");
-const bad=[...css.matchAll(/--openui-[\w-]+\s*:\s*oklch\(\s*[\d.]+\s+([\d.]+)/g)]
-  .filter((m)=>Number(m[1])!==0);
-if(bad.length){console.error(bad.map((m)=>m[0]));process.exit(1)}
-console.log("all chroma 0")
+const c = require("./lib/chat/catalog.json");
+console.log(c.id, c.protocolVersion, Object.keys(c.components).length, Object.keys(c.functions).length);
 '
-grep -nE '#[0-9a-fA-F]{3,8}|rgba?\(|hsla?\(' app/openui-monochrome.css && exit 1 || true
 ```
 
-Expected: `wrote app/openui-monochrome.css (<n> tokens)`, `all chroma 0`, and the final grep prints nothing.
+Expected: id `https://sando.app/catalogs/chat/v1/catalog.json`, protocolVersion `1.0`, 9 components, 14 functions.
 
-- [ ] **Step 5: Load the stylesheets in the right order**
+- [ ] **Step 4: Write the pure helpers**
 
-In `app/layout.tsx`, add before the existing `import "./globals.css";`:
+Create `lib/chat/a2ui.ts` with these pure exports:
 
-```tsx
-import "@openuidev/react-ui/styles/index.css";
+```ts
+export type A2UIFrame = { d?: string; done?: true; error?: string };
+
+/**
+ * Parses one NDJSON line. Returns null for blank lines.
+ * Throws for malformed JSON so the caller can surface a protocol error.
+ */
+export function parseA2UIFrame(line: string): A2UIFrame | null;
+
+/** Decodes a base64 frame payload into bytes. */
+export function decodeFrameBytes(base64: string): Uint8Array;
+
+/** True for http(s) URLs only. */
+export function isSafeUrl(url: string): boolean;
+
+/** True when the value is a v1.0 A2UI agent-to-renderer message. */
+export function isA2UIMessage(value: unknown): value is AgentToRendererMessage;
+
+/** Parses one wire-log line; throws when it is not a v1.0 A2UI message. */
+export function parseA2UIMessage(line: string): AgentToRendererMessage;
+
+/** True when the wire log holds at least one A2UI message. */
+export function looksLikeA2UI(content: string): boolean;
+
+/** Splits a wire log into its messages, skipping blank/invalid lines. */
+export function splitA2UIMessages(content: string): AgentToRendererMessage[];
+
+/** Loads the Sando catalog from catalog.json. */
+export function loadSandoCatalog(): Catalog;
+
+/** The openUrl function implementation: rendererOnly, requires user activation, http/https only. */
+export function createSandoOpenUrl(): FunctionImplementation;
 ```
 
-In `app/globals.css`, after the first line `@import "tailwindcss";`, add:
-
-```css
-@import "./openui-monochrome.css";
-```
-
-- [ ] **Step 6: Verify the build still passes**
+- [ ] **Step 5: Verify the build still passes**
 
 Run:
 
@@ -161,41 +163,36 @@ npx tsc --noEmit
 npx next build
 ```
 
-Expected: both exit 0. No CSS import resolution errors.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add package.json bun.lock app/layout.tsx app/globals.css scripts/generate-openui-theme.mjs app/openui-monochrome.css
-git commit -m "feat(openui): add OpenUI packages and monochrome token theme"
-```
+Expected: both exit 0.
 
 ---
 
 ## Task 2: Add `mode: "ui"` to the Zig Backend
 
+**Status:** Open — lives on Dominic's laptop; not built yet.
+
 **Files:**
-- Create: `/home/psrockstar/Documents/code/sando/src/connnector/openui_spec.zig` (generated)
-- Create: `/home/psrockstar/Documents/code/sando_frontend/sando_ui/scripts/generate-openui-prompt.mjs`
+- Create: `/home/psrockstar/Documents/code/sando/src/connnector/a2ui_spec.zig` (generated)
+- Create: `/home/psrockstar/Documents/code/sando_frontend/sando_ui/scripts/generate-a2ui-prompt.mjs`
 - Modify: `/home/psrockstar/Documents/code/sando/src/connnector/glue.zig`
 - Modify: `/home/psrockstar/Documents/code/sando/src/server.zig`
 
 **Interfaces:**
-- Produces: `POST /api/chat` accepts `{ messages, mode?: "text" | "ui", stream?: bool }` and returns `{ response, format, dialect, source_count, is_cached, choices }` where `format` is `"text"` or `"openui"`.
-- Produces: `RagOptions.ui_mode: bool = false`; `glue.ask` appends the OpenUI spec when true.
+- Produces: `POST /api/chat` accepts `{ messages, mode?: "text" | "ui", stream?: bool }` and returns `{ response, format, dialect, source_count, is_cached, choices }` where `format` is `"text"` or `"a2ui"`.
+- Produces: `RagOptions.ui_mode: bool = false`; `glue.ask` appends the A2UI spec when true.
 - Consumes: the existing `glue.ask`, `:system_prompt_template`, and `UserSession` from the current backend.
 
 - [ ] **Step 1: Write the prompt generator**
 
-Create `scripts/generate-openui-prompt.mjs` in the UI repo. It must:
+Create `scripts/generate-a2ui-prompt.mjs` in the UI repo. It must:
 
-1. Import `generateSystemPrompt` from `@openuidev/react-lang` and `{ openuiLibrary, openuiPromptOptions }` from `@openuidev/react-ui/genui-lib`.
-2. Call `generateSystemPrompt({ library: openuiLibrary, promptOptions: openuiPromptOptions })`.
-3. Assert the result is longer than 20,000 characters and contains `openui-lang`.
+1. Read `lib/chat/catalog.json` and render it as the catalog section of the prompt.
+2. Append the wire-format instructions: the reply is a sequence of A2UI v1.0 JSON messages, one object per line, each with `version: "1.0"` and one of `createSurface`, `updateComponents`, `updateDataModel`, `deleteSurface`; `createSurface` carries `surfaceId`, `catalogId` `https://sando.app/catalogs/chat/v1/catalog.json`, and initial components + data model; one component must have `id: "root"`; data bindings use `{"@path": "..."}`; ChoicePicker selection is always an array, even in mutuallyExclusive mode.
+3. Assert the result is longer than 2,000 characters and contains `a2ui`.
 4. Render the Zig file:
 
 ```zig
-// Generated by sando_ui/scripts/generate-openui-prompt.mjs. Do not edit by hand.
+// Generated by sando_ui/scripts/generate-a2ui-prompt.mjs. Do not edit by hand.
 pub const spec =
     \\<each prompt line, prefixed with four spaces and two backslashes>
 ;
@@ -203,7 +200,7 @@ pub const spec =
 
 Every prompt line must be escaped for a Zig multiline string: prefix it with four spaces and `\\`, and double any literal backslash in the prompt. Braces do **not** need escaping, because the spec is passed to `std.fmt.allocPrint` as an `{s}` argument and is never itself used as a format string. The generator must reject any line that would end with a lone backslash. It must also convert a leading `\` in the prompt to `\\`.
 
-5. Write to the path in `process.argv[2] ?? "../../sando/src/connnector/openui_spec.zig"`. Resolve it relative to `process.cwd()`.
+5. Write to the path in `process.argv[2] ?? "../../sando/src/connnector/a2ui_spec.zig"`. Resolve it relative to `process.cwd()`.
 6. Print `wrote <path> (<n> chars)`.
 
 - [ ] **Step 2: Generate the spec and prove it compiles as Zig**
@@ -212,22 +209,22 @@ Run:
 
 ```bash
 cd /home/psrockstar/Documents/code/sando_frontend/sando_ui
-node scripts/generate-openui-prompt.mjs
-head -3 ../../sando/src/connnector/openui_spec.zig
-wc -c ../../sando/src/connnector/openui_spec.zig
+node scripts/generate-a2ui-prompt.mjs
+head -3 ../../sando/src/connnector/a2ui_spec.zig
+wc -c ../../sando/src/connnector/a2ui_spec.zig
 cd ../../sando && zig build
 ```
 
-Expected: `wrote /home/.../sando/src/connnector/openui_spec.zig (23310 chars)` (the exact character count may differ slightly), the head shows the generated header, and `zig build` exits 0. If `zig build` fails on the string, fix the escaping in the generator, not the generated file.
+Expected: `wrote /home/.../sando/src/connnector/a2ui_spec.zig (<n> chars)`, the head shows the generated header, and `zig build` exits 0. If `zig build` fails on the string, fix the escaping in the generator, not the generated file.
 
 - [ ] **Step 3: Add `ui_mode` and the prompt override in `glue.zig`**
 
-Add `@import("openui_spec.zig")` as `openui_spec` at the top of `glue.zig`.
+Add `@import("a2ui_spec.zig")` as `a2ui_spec` at the top of `glue.zig`.
 
 Add to `RagOptions`:
 
 ```zig
-/// Render the answer as OpenUI Lang instead of plain text.
+/// Render the answer as A2UI v1.0 messages instead of plain text.
 ui_mode: bool = false,
 ```
 
@@ -236,15 +233,17 @@ Add this constant above `system_prompt_template`:
 ```zig
 const ui_output_override =
     \\OUTPUT FORMAT OVERRIDE (takes precedence over section 13)
-    \\Your reply is rendered by OpenUI, not as a chat bubble. Respond with
-    \\valid openui-lang code and nothing else. Every reply must define
-    \\root = Stack(...). Do not wrap the program in markdown fences. Do not
-    \\write prose before or after the program. Use TextContent for short
-    \\answers and the richer components when the answer benefits from them.
-    \\Do not emit <<<MEMORY_UPDATE>>> tags in this mode; they would appear in
-    \\the rendered answer.
+    \\Your reply is rendered by A2UI, not as a chat bubble. Respond with
+    \\A2UI v1.0 messages and nothing else: one JSON object per line, each
+    \\with "version": "1.0" and one of createSurface, updateComponents,
+    \\updateDataModel, deleteSurface. The first message must be a
+    \\createSurface with a "root" component. Do not wrap the reply in
+    \\markdown fences. Do not write prose before or after the messages.
+    \\Use Text for short answers and the richer components when the answer
+    \\benefits from them. Do not emit <<<MEMORY_UPDATE>>> tags in this
+    \\mode; they would appear in the rendered answer.
     \\
-    \\OPENUI-LANG SPECIFICATION
+    \\A2UI CATALOG AND WIRE FORMAT
     \\{s}
 ;
 ```
@@ -258,7 +257,7 @@ const base_prompt = try std.fmt.allocPrint(alloc, system_prompt_template, .{
 });
 
 const system_prompt = if (options.ui_mode) blk: {
-    const override = try std.fmt.allocPrint(alloc, ui_output_override, .{openui_spec.spec});
+    const override = try std.fmt.allocPrint(alloc, ui_output_override, .{a2ui_spec.spec});
     break :blk try std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ base_prompt, override });
 } else base_prompt;
 ```
@@ -287,7 +286,7 @@ Define `const wants_ui = parsed.mode != null and std.mem.eql(u8, parsed.mode.?, 
 Add `format: []const u8` to `ChatResponsePayload` and set it:
 
 ```zig
-.format = if (wants_ui) "openui" else "text",
+.format = if (wants_ui) "a2ui" else "text",
 ```
 
 - [ ] **Step 5: Verify the backend serves both modes**
@@ -302,10 +301,10 @@ curl -sS -X POST http://127.0.0.1:22323/api/chat \
   -d '{"messages":[{"role":"user","content":"Say hello in Koloqua"}],"mode":"text"}' | jq '{format, first: (.response[0:40])}'
 curl -sS -X POST http://127.0.0.1:22323/api/chat \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"messages":[{"role":"user","content":"Show me a short greeting card in Koloqua"}],"mode":"ui"}' | jq '{format, first: (.response[0:120])}'
+  -d '{"messages":[{"role":"user","content":"Show me a short greeting card in Koloqua"}],"mode":"ui"}' | jq '{format, first: (.response[0:200])}'
 ```
 
-Expected: the text request reports `format: "text"` and plain prose; the UI request reports `format: "openui"` and the response starts with `root = Stack(` or another valid program declaration. If the model returns prose for the UI request, tighten the override wording and repeat. This is the model-quality gate.
+Expected: the text request reports `format: "text"` and plain prose; the UI request reports `format: "a2ui"` and the response starts with a `createSurface` message. If the model returns prose for the UI request, tighten the override wording and repeat. This is the model-quality gate.
 
 - [ ] **Step 6: Commit the UI-side generator; record the backend change**
 
@@ -313,15 +312,17 @@ The backend is not a git repository. Commit the generator in the UI repo:
 
 ```bash
 cd /home/psrockstar/Documents/code/sando_frontend/sando_ui
-git add scripts/generate-openui-prompt.mjs
-git commit -m "feat(openui): generate the OpenUI system prompt for the backend"
+git add scripts/generate-a2ui-prompt.mjs
+git commit -m "feat(a2ui): generate the A2UI system prompt for the backend"
 ```
 
-Note in the handoff that `glue.zig`, `server.zig`, and `openui_spec.zig` are changed outside git and must be kept with the backend deployment.
+Note in the handoff that `glue.zig`, `server.zig`, and `a2ui_spec.zig` are changed outside git and must be kept with the backend deployment.
 
 ---
 
 ## Task 3: Add `mode` to the Next Chat Proxy and API Client
+
+**Status:** Done in the A2UI swap.
 
 **Files:**
 - Modify: `lib/api/backend.ts`
@@ -331,8 +332,8 @@ Note in the handoff that `glue.zig`, `server.zig`, and `openui_spec.zig` are cha
 **Interfaces:**
 - Produces: `callBackendStream(path, request, body, timeoutMs?) => Promise<BackendStreamResult>`.
 - Produces: `sendPrompt({ ..., mode }) => Promise<ChatResponse>` with `ChatResponse.mode`.
-- Produces: `streamPrompt({ ..., onToken }) => Promise<StreamChatResponse>` reading base64 NDJSON frames.
-- Produces: `POST /api/chat` accepts `mode` and returns `{ reply, mode }`; with `stream: true` it returns `content-type: application/x-ndjson`.
+- Produces: `streamPrompt({ ..., onMessage }) => Promise<StreamChatResponse>` reading base64 NDJSON frames, one complete A2UI message per frame.
+- Produces: `POST /api/chat` accepts `mode` and returns `{ reply, mode }`; with `stream: true` and `mode: "ui"` it returns `content-type: application/x-ndjson`.
 
 - [ ] **Step 1: Add the streaming backend helper**
 
@@ -362,9 +363,9 @@ Implementation notes:
 
 In `app/api/chat/route.ts`:
 - Parse `mode` as `payload.mode === "ui" ? "ui" : "text"`.
-- Parse `stream` as `payload.stream === true`.
-- Non-streaming: forward `{ messages, mode, stream: false }`, then return `{ reply: mode === "ui" ? rawReply : toPlainText(rawReply), mode }`.
-- Streaming: require `mode === "ui"` (otherwise return 400 `streaming is only supported for mode "ui"`). Forward `{ messages, mode, stream: true }` through `callBackendStream`. On success, return a `Response` whose body is the upstream `ReadableStream`, headers:
+- Parse `stream` as `payload.stream === true && mode === "ui"` (streaming is only for ui mode; a text-mode request with `stream: true` answers non-streaming).
+- Non-streaming: forward `{ messages, mode, stream: false }`, then return `{ reply: mode === "ui" ? rawReply : toPlainText(rawReply), mode }`. The ui reply is the wire log, passed through untouched.
+- Streaming: forward `{ messages, mode, stream: true }` through `callBackendStream`. On success, return a `Response` whose body is the upstream `ReadableStream`, headers:
 
 ```ts
 {
@@ -382,30 +383,13 @@ Change `SendPromptParams` to include `mode?: "text" | "ui"`, default `"text"`. C
 
 - [ ] **Step 4: Add `streamPrompt` and the frame decoder**
 
-Create `lib/chat/openui.ts` with this pure export:
-
-```ts
-export type OpenUIFrame = { d?: string; done?: true; error?: string };
-
-/**
- * Parses one NDJSON line. Returns null for blank lines.
- * Throws for malformed JSON so the caller can surface a protocol error.
- */
-export function parseOpenUIFrame(line: string): OpenUIFrame | null;
-
-/** Decodes a base64 frame payload into bytes. */
-export function decodeFrameBytes(base64: string): Uint8Array;
-
-/** True for http(s) URLs only. */
-export function isSafeUrl(url: string): boolean;
-```
-
-Add to `lib/api/api.ts`:
+`lib/chat/a2ui.ts` (Task 1) holds `parseA2UIFrame` and `decodeFrameBytes`. Add to `lib/api/api.ts`:
 
 ```ts
 export interface StreamPromptParams extends SendPromptParams {
   mode: "ui";
-  onToken: (chunk: string) => void;
+  /** One complete A2UI wire message per call, in stream order. */
+  onMessage: (message: AgentToRendererMessage) => void;
 }
 export interface StreamChatResponse { reply: string; mode: "ui" }
 export async function streamPrompt(params: StreamPromptParams): Promise<StreamChatResponse>;
@@ -417,8 +401,8 @@ Implementation:
 - If `res.body` is null, throw `ApiError("The server did not return a stream.", 502)`.
 - Create **one** `TextDecoder("utf-8")` for the wire bytes and **one** `TextDecoder("utf-8")` for frame payloads. Both are used with `{ stream: true }` so a codepoint split across frames survives.
 - Read with `res.body.getReader()`, decode each wire chunk, split on `\n`, and keep the remainder between reads.
-- For each frame: `error` → throw `ApiError` with the accumulated reply attached as `partial`; `d` → `decodeFrameBytes` and append the decoded text to the reply and pass it to `onToken`; `done` → stop.
-- The caller's `signal` aborts the reader. A network failure after tokens is thrown as `ApiError` with the partial reply attached as `(err as ApiError & { partial?: string }).partial`.
+- For each frame: `error` → throw `ApiError` with the accumulated reply attached as `partial`; `d` → decode the base64 payload, `JSON.parse` it, validate with `isA2UIMessage` (a malformed or non-A2UI frame throws `ApiError` with `partial`), append `JSON.stringify(message)` to the reply, and pass the message to `onMessage`; `done` → stop.
+- The caller's `signal` aborts the reader. A network failure after messages is thrown as `ApiError` with the partial reply attached as `(err as ApiError & { partial?: string }).partial`.
 
 - [ ] **Step 5: Verify the proxy with a hand-written upstream check**
 
@@ -431,30 +415,26 @@ curl -sS -X POST http://localhost:3000/api/chat \
   -d '{"messages":[{"role":"user","content":"Say hello"}],"mode":"ui"}' | head -c 200
 ```
 
-Expected: a JSON object containing `"mode":"ui"` and a `reply` beginning with OpenUI Lang (no `toPlainText` cleanup).
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add lib/api/backend.ts lib/api/api.ts lib/chat/openui.ts app/api/chat/route.ts
-git commit -m "feat(openui): proxy UI-mode chat through Next"
-```
+Expected: a JSON object containing `"mode":"ui"` and a `reply` holding the A2UI wire log (no `toPlainText` cleanup).
 
 ---
 
-## Task 4: Render OpenUI Answers in the Existing Chat
+## Task 4: Render A2UI Answers in the Existing Chat
+
+**Status:** Done in the A2UI swap.
 
 **Files:**
-- Create: `components/chat/OpenUIAnswer.tsx`
+- Create: `components/chat/A2UIAnswer.tsx`
 - Modify: `lib/chat/store.ts`
 - Modify: `app/chat/ChatView.tsx`
 
 **Interfaces:**
-- Produces: `OpenUIAnswer` default export with:
+- Produces: `A2UIAnswer` default export with:
 
 ```ts
-interface OpenUIAnswerProps {
-  code: string;
+interface A2UIAnswerProps {
+  /** A2UI wire messages, one JSON object per line. */
+  messages: string;
   isStreaming?: boolean;
   state?: Record<string, unknown>;
   onStateUpdate?: (state: Record<string, unknown>) => void;
@@ -462,76 +442,73 @@ interface OpenUIAnswerProps {
 }
 ```
 
-- Produces: `StoredMessage.kind?: "text" | "openui"` and `StoredMessage.uiState?: Record<string, unknown>`.
-- Consumes: `sendPrompt({ mode: "ui" })` from Task 3.
+- Produces: `StoredMessage.kind?: "text" | "a2ui"` and `StoredMessage.uiState?: Record<string, unknown>`.
+- Consumes: `streamPrompt({ mode: "ui" })` from Task 3.
 
 - [ ] **Step 1: Extend the message schema without breaking old data**
 
 In `lib/chat/store.ts`:
 
 ```ts
-export type ChatKind = "text" | "openui";
+export type ChatKind = "text" | "a2ui";
 
 export interface StoredMessage {
   id: string;
   role: ChatRole;
   content: string;
   createdAt: number;
-  /** Absent means "text", so messages stored before OpenUI still load. */
+  /** Absent means "text", so messages stored before A2UI still load. */
   kind?: ChatKind;
-  /** OpenUI form state, persisted with the message. */
+  /** A2UI data-model snapshot (form state), persisted with the message. */
   uiState?: Record<string, unknown>;
 }
 ```
 
-Extend `isMessage` to accept `kind` only when it is `"text"` or `"openui"`, and `uiState` only when it is a non-null object. Missing fields remain valid.
+Extend `isMessage` to accept `kind` only when it is `"text"` or `"a2ui"`, and `uiState` only when it is a non-null object. Missing fields remain valid.
 
 - [ ] **Step 2: Build the renderer component**
 
-Create `components/chat/OpenUIAnswer.tsx` with `"use client"` at the top.
+Create `components/chat/A2UIAnswer.tsx` with `"use client"` at the top.
 
 Rules:
-- Import `Renderer`, `BuiltinActionType`, and `type LibraryActionEvent` from `@openuidev/react-lang`.
-- Import `{ openuiLibrary }` from `@openuidev/react-ui/genui-lib`.
-- Render inside `<div className="openui-answer min-w-0 text-sm">`.
-- Pass `response={code}`, `library={openuiLibrary}`, `isStreaming`, `initialState={state}`, `onStateUpdate`, and `onError`.
-- Pass a grayscale `queryLoader` so the library's default blue spinner never appears:
-
-```tsx
-queryLoader={<span className="size-4 animate-spin rounded-full border-2 border-t-transparent border-white/70" />}
-```
-
-- `onAction(event)`:
-  - `event.type === BuiltinActionType.ContinueConversation` (the string `"continue_conversation"`) → `onFollowUp(event.humanFriendlyMessage.trim())` when non-empty.
-  - `event.type === BuiltinActionType.OpenUrl` (the string `"open_url"`) → read `event.params.url`; when it is a string and `isSafeUrl(url)` is true, call `window.open(url, "_blank", "noopener,noreferrer")`.
-  - Everything else: ignore.
-- `onError(errors)`: keep rendering when every error has `severity === "warning"`. If any error has no `severity` (the library's error case) and `isStreaming` is false, set `failedCode = code` and render a plain-text fallback:
+- Import `A2uiSurface`, `createComponentImplementation`, `useNodeView`, `useSignalValue` from `@a2ui/react`; `Catalog`, `MessageProcessor`, `createFunctionImplementation`, `BASIC_FUNCTIONS` from `@a2ui/web_core`; `basicCatalog` from `@a2ui/web_core/catalogs/basic/v1` only to derive the Sando catalog's shapes in the generator — the component itself loads the Sando catalog with `loadSandoCatalog()`.
+- Build the `MessageProcessor` with ONLY the Sando catalog and `{ version: "1.0" }` (the default is v0.9). Never pass the basic catalog to the processor.
+- Implement the 9 catalog components with monochrome Tailwind classes (Text, Button, Card, Column, Row, List, Divider, TextField, ChoicePicker). Use `createComponentImplementation`; resolve dynamic props through the generic binder (actions become callables, `ChildList` becomes ids, dynamic values come with `setX` setters).
+- Replace the stock `openUrl` with Sando's own (`createSandoOpenUrl`): rendererOnly, requires user activation, `isSafeUrl` (http/https only) before `window.open(url, "_blank", "noopener,noreferrer")`.
+- Action handling: an event with `userMessage` → `onFollowUp(userMessage)`; any other event → `onFollowUp` with the JSON envelope `{"a2ui_action": {"name", "context", "surfaceId", "sourceComponentId"}}`. A function call named `openUrl` is handled by the implementation itself. ChoicePicker reports selection as an array even in mutuallyExclusive mode — expect an array.
+- Form state: subscribe to the data model at `/`; report every change through `onStateUpdate`. On first surface, restore a passed `state` with an `updateDataModel` at path `/`.
+- Errors: `processMessagesWithErrors` returns hard errors. While streaming, a
+  failed message is tolerated (a later message may fix the surface). Once
+  streaming stops, a failed message renders the plain-text fallback:
 
 ```tsx
 <pre className="whitespace-pre-wrap break-words text-sm leading-relaxed text-neutral-100">
-  {code}
+  {content}
 </pre>
 ```
 
-Reset `failedCode` in a `useEffect` when `code` changes, so a corrected program renders again.
-- Do not import `AgentInterface` or any of its providers.
+A stream that ends with no surface at all shows the raw log the same way,
+derived during render — never a blank bubble. Content that parses as no A2UI
+message at all is not an error — it renders as prose, never a blank bubble.
+- Render inside `<div className="a2ui-answer min-w-0 text-sm">`.
+- Do not import `@a2ui/lit` or any vendor chat shell.
 
 - [ ] **Step 3: Render stored answers and follow-ups in `ChatView`**
 
 In `app/chat/ChatView.tsx`:
-- Replace the static import of the answer component with a client-only dynamic import so the OpenUI library never runs during SSR:
+- Replace the static import of the answer component with a client-only dynamic import so the A2UI custom elements never run during SSR:
 
 ```tsx
-const OpenUIAnswer = dynamic(() => import("@/components/chat/OpenUIAnswer"), { ssr: false });
+const A2UIAnswer = dynamic(() => import("@/components/chat/A2UIAnswer"), { ssr: false });
 ```
 
 - Extend `Bubble` to accept `onFollowUp` and `onStateUpdate`:
 
 ```tsx
-if (message.role === "assistant" && message.kind === "openui") {
+if (message.role === "assistant" && message.kind === "a2ui") {
   return (
-    <OpenUIAnswer
-      code={message.content}
+    <A2UIAnswer
+      content={message.content}
       state={message.uiState}
       onStateUpdate={(state) => onStateUpdate(message.id, state)}
       onFollowUp={onFollowUp}
@@ -542,7 +519,7 @@ if (message.role === "assistant" && message.kind === "openui") {
 
 - `onStateUpdate(id, state)` writes the updated message back with `saveConversation`, preserving all other fields.
 - `onFollowUp(prompt)` calls `send(prompt)`.
-- `send` gains a `mode` argument defaulting to `"ui"`. It calls `sendPrompt({ mode })`; on success it stores:
+- `send` streams in `mode: "ui"` (see Task 6). On success it stores:
 
 ```ts
 const answer: Message = {
@@ -550,11 +527,12 @@ const answer: Message = {
   role: "assistant",
   content: reply,
   createdAt: Date.now(),
-  kind: mode === "ui" ? "openui" : "text",
+  kind: looksLikeA2UI(reply) ? "a2ui" : "text",
+  uiState: draftState.current,
 };
 ```
 
-- If the UI-mode response does not start with a plausible program (`/^\s*(root|[A-Za-z_][A-Za-z0-9_]*)\s*=/m` fails), store it as `kind: "text"` and render the prose, so a model that ignores the prompt never produces an empty bubble.
+- If the UI-mode response holds no A2UI message (`looksLikeA2UI` fails), it is stored as `kind: "text"` and rendered as prose, so a model that ignores the prompt never produces an empty bubble.
 
 - [ ] **Step 4: Verify end-to-end rendering**
 
@@ -570,21 +548,16 @@ Then in the browser at `http://localhost:3000/chat`, send `Show me a short greet
 
 Expected:
 - The user bubble is unchanged.
-- The assistant answer renders as an OpenUI card/stack, not raw DSL.
+- The assistant answer renders as an A2UI card/stack, not raw JSON.
 - The sidebar still lists the conversation.
 - Reloading the page restores the rendered answer.
 - A response containing form inputs keeps its values after reload.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add components/chat/OpenUIAnswer.tsx lib/chat/store.ts app/chat/ChatView.tsx
-git commit -m "feat(openui): render intelligent answers in chat"
-```
-
 ---
 
-## Task 5: Stream Tokens from the Zig Backend
+## Task 5: Stream A2UI Messages from the Zig Backend
+
+**Status:** Open — lives on Dominic's laptop; not built yet.
 
 **Files:**
 - Modify: `/home/psrockstar/Documents/code/sando/src/ai/ai.zig`
@@ -594,7 +567,7 @@ git commit -m "feat(openui): render intelligent answers in chat"
 **Interfaces:**
 - Produces: `ai.TokenSink` and `ai.chatStreaming(system_prompt, user_prompt, sink) ![]const u8`.
 - Produces: `RagOptions.on_token_sink: ?ai.TokenSink = null`.
-- Produces: `POST /api/chat` with `{ mode: "ui", stream: true }` responds `content-type: application/x-ndjson` and frames `{"d":"<base64>"}\n`, ending with `{"done":true}\n`.
+- Produces: `POST /api/chat` with `{ mode: "ui", stream: true }` responds `content-type: application/x-ndjson` and frames `{"d":"<base64>"}\n`, ending with `{"done":true}\n`. Each decoded `d` frame is exactly one complete A2UI v1.0 message.
 
 - [ ] **Step 1: Add the token sink and incremental SSE reader**
 
@@ -701,6 +674,8 @@ When `wants_stream`:
 
 When `wants_stream` is false, keep the existing JSON path unchanged.
 
+**Framing note:** the model emits A2UI messages as lines; `glue.ask` must forward whole lines to the sink (buffer deltas until `\n`), because the client treats each decoded `d` frame as one complete message. A frame that splits a message mid-object fails validation on the client.
+
 - [ ] **Step 4: Verify the stream with curl**
 
 Build and restart the backend, then:
@@ -714,15 +689,17 @@ curl -sS -N -X POST http://127.0.0.1:22323/api/chat \
   | head -8
 ```
 
-Expected: several `{"d":"..."}` lines arrive before the process exits, then `{"done":true}`. Decoding a few frames should produce the beginning of `root = Stack(`. If all frames arrive at once, confirm `postStreaming` reads with `readSliceShort` rather than buffering the whole body first.
+Expected: several `{"d":"..."}` lines arrive before the process exits, then `{"done":true}`. Decoding a few frames should produce complete A2UI v1.0 messages, the first a `createSurface`. If all frames arrive at once, confirm `postStreaming` reads with `readSliceShort` rather than buffering the whole body first.
 
 - [ ] **Step 5: Record the backend change**
 
-The backend is not a git repository. Keep `ai.zig`, `glue.zig`, `server.zig`, and `openui_spec.zig` together, rebuild, and restart before the frontend streaming task.
+The backend is not a git repository. Keep `ai.zig`, `glue.zig`, `server.zig`, and `a2ui_spec.zig` together, rebuild, and restart before the frontend streaming task.
 
 ---
 
-## Task 6: Stream OpenUI Answers into the Chat
+## Task 6: Stream A2UI Answers into the Chat
+
+**Status:** Done in the A2UI swap.
 
 **Files:**
 - Modify: `app/api/chat/route.ts` (already supports streaming from Task 3; verify no change is needed)
@@ -730,41 +707,46 @@ The backend is not a git repository. Keep `ai.zig`, `glue.zig`, `server.zig`, an
 - Modify: `app/chat/ChatView.tsx`
 
 **Interfaces:**
-- Consumes: `streamPrompt({ mode: "ui", onToken })`.
-- Produces: a live draft rendered with `OpenUIAnswer` and persisted on completion or abort.
+- Consumes: `streamPrompt({ mode: "ui", onMessage })`.
+- Produces: a live draft rendered with `A2UIAnswer` and persisted on completion or error (not on user abort).
 
 - [ ] **Step 1: Add the live draft state**
 
 In `Chat`, add:
 
 ```tsx
-const [draft, setDraft] = useState<{ id: string; content: string } | null>(null);
+const [draft, setDraft] = useState<string | null>(null);
+/** Latest form state of the streaming reply, attached when it is saved. */
+const draftState = useRef<Record<string, unknown> | undefined>(undefined);
 ```
 
-`draft.content` grows with every token. Do not write partial drafts to `localStorage` on every token; write once when the stream ends, is aborted, or fails after at least one token.
+`draft` is the wire log growing with every message. Do not write partial drafts to `localStorage` on every message; write once when the stream ends or fails after at least one message.
 
 - [ ] **Step 2: Replace the non-streaming call with `streamPrompt`**
 
 In `send`:
-- Create `const draftId = crypto.randomUUID();`
-- `setDraft({ id: draftId, content: "" });`
+- `setDraft("")` and `draftState.current = undefined` when the send starts.
 - Call:
 
 ```ts
+let log = "";
 const { reply } = await streamPrompt({
   prompt: content,
   history,
   token,
   mode: "ui",
   signal: controller.signal,
-  onToken: (chunk) => setDraft((d) => (d ? { ...d, content: d.content + chunk } : d)),
+  onMessage: (message) => {
+    log += `${JSON.stringify(message)}\n`;
+    setDraft(log);
+  },
 });
 ```
 
-- On success, save the final answer with `kind: "openui"` and `setDraft(null)`.
-- On abort, if the draft has non-empty content, save it with `kind: "openui"`; then `setDraft(null)`.
-- On error, if a partial reply was attached to the error, save it and show the error text below it; otherwise show the error as today.
-- Always `setDraft(null)` in `finally`.
+- On success, save the final answer with `kind: looksLikeA2UI(reply) ? "a2ui" : "text"` and `uiState: draftState.current`; then `setDraft(null)`.
+- On abort, discard the draft and save nothing; then `setDraft(null)`.
+- On error, if a partial reply was attached to the error, save it (with the same `kind` rule) and show the error text below it; otherwise show the error as today.
+- Always `setDraft(null)` and `draftState.current = undefined` in `finally`.
 - If the view unmounts mid-stream (for example the user opens another conversation), the async callback still writes the final answer to the store. The live draft is component state and is intentionally not preserved; this matches the current typing indicator.
 
 - [ ] **Step 3: Render the draft**
@@ -772,30 +754,31 @@ const { reply } = await streamPrompt({
 After the stored messages, before the typing bubble:
 
 ```tsx
-{draft && (
-  hasAssignment(draft.content) ? (
-    <OpenUIAnswer
-      code={draft.content}
+{draft !== null && draft.length > 0 ? (
+  looksLikeA2UI(draft) ? (
+    <A2UIAnswer
+      content={draft}
       isStreaming
-      onFollowUp={(prompt) => void send(prompt)}
+      onStateUpdate={(state) => { draftState.current = state; }}
+      onFollowUp={send}
     />
   ) : (
     <div className="flex justify-start">
       <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-md bg-white/[0.07] px-4 py-2.5 text-sm leading-relaxed text-neutral-100 md:max-w-[70%]">
-        {draft.content}
+        {toPlainText(draft)}
       </div>
     </div>
   )
+) : (
+  loading && <TypingBubble />
 )}
 ```
 
-Define `hasAssignment(code)` next to the Task 4 heuristic as `/(^|\n)\s*(root|[A-Za-z_][A-Za-z0-9_]*)\s*=/.test(code)`. It keeps early prose visible while the model is still on its first line, then hands over to the renderer as soon as a statement appears.
+`looksLikeA2UI` keeps early prose visible as a text bubble while the first message is still arriving, then hands over to the renderer as soon as a message parses. Keep the typing bubble only while `loading && !draft`. Scroll-follow should depend on `draft` too, so the view follows the growing answer.
 
-Keep the typing bubble only while `loading && !draft`. Scroll-follow should depend on `draft?.content` too, so the view follows the growing answer.
+- [ ] **Step 4: Guard the renderer against partial surfaces**
 
-- [ ] **Step 4: Guard the renderer against partial syntax**
-
-`OpenUIAnswer` must not unmount the rendered tree between tokens. Pass the full accumulated string every time and let `Renderer` handle partial programs. If `onError` reports only `severity: "warning"`, keep rendering. If the parse result is null after a non-empty draft, render a plain `<pre className="whitespace-pre-wrap text-sm">{code}</pre>` instead of an empty box.
+`A2UIAnswer` must not unmount the rendered tree between messages. Pass the full accumulated log every time and let the processor apply messages in order. A failed message while streaming is tolerated; once streaming stops it falls back to the raw log as plain text. If the log parses to no message at all after a non-empty draft, ChatView renders the prose as a text bubble instead of an empty box (the `looksLikeA2UI` branch above).
 
 - [ ] **Step 5: Verify progressive rendering in the browser**
 
@@ -804,24 +787,19 @@ Run the dev server with the backend streaming build. Send `Plan a three-day Monr
 Expected:
 - Text appears incrementally, not all at once.
 - The rendered card appears before the stream ends and fills in.
-- Stop (the square button) keeps the partial answer and re-enables the composer.
-- The sidebar title is based on the user prompt, not the OpenUI Lang.
+- Stop (the square button) discards the draft and re-enables the composer.
+- The sidebar title is based on the user prompt, not the A2UI wire log.
 - Reload restores the completed answer.
 - No console warnings about hydration or unknown components.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add app/chat/ChatView.tsx components/chat/OpenUIAnswer.tsx lib/api/api.ts app/api/chat/route.ts
-git commit -m "feat(openui): stream intelligent answers into chat"
-```
 
 ---
 
 ## Task 7: Failure Paths, Design Audit, and Final Verification
 
+**Status:** Next-side parts done in the A2UI swap (helpers + build gate verified); browser checks still open, pending the backend.
+
 **Files:**
-- Modify: `components/chat/OpenUIAnswer.tsx` (only for the fallback)
+- Modify: `components/chat/A2UIAnswer.tsx` (only for the fallback)
 - Modify: `app/chat/ChatView.tsx` (only for error placement)
 
 **Interfaces:**
@@ -830,11 +808,11 @@ git commit -m "feat(openui): stream intelligent answers into chat"
 
 - [ ] **Step 1: Pin the unsafe-URL and prose-fallback behavior**
 
-First test the pure helper directly with Bun:
+First test the pure helpers directly with Bun:
 
 ```bash
 bun -e '
-import { isSafeUrl } from "./lib/chat/openui.ts";
+import { isSafeUrl, looksLikeA2UI } from "./lib/chat/a2ui.ts";
 const cases = [
   ["https://example.com", true],
   ["http://example.com/a", true],
@@ -847,21 +825,22 @@ for (const [url, want] of cases) {
   if (got !== want) { console.error("FAIL", url, got, "want", want); process.exit(1); }
 }
 console.log("url policy ok");
+console.log("prose is not a2ui:", looksLikeA2UI("This is a normal sentence, not A2UI.") === false);
 '
 ```
 
-Expected: `url policy ok`.
+Expected: `url policy ok` and `prose is not a2ui: true`.
 
 Then verify with a hand-written message in `localStorage`:
 
 ```js
-const id = "openui-test";
+const id = "a2ui-test";
+const surface = JSON.stringify({ version: "1.0", createSurface: { surfaceId: "s1", catalogId: "https://sando.app/catalogs/chat/v1/catalog.json", components: [{ id: "root", component: "Column", children: ["b1"] }, { id: "b1", component: "Button", child: "t1", action: { functionCall: { name: "openUrl", arguments: { url: "javascript:alert(1)" } } } }, { id: "t1", component: "Text", text: "Open" }] } });
 localStorage.setItem("sando:conversations:v1", JSON.stringify([{
-  id, title: "OpenUI test", createdAt: Date.now(), updatedAt: Date.now(),
+  id, title: "A2UI test", createdAt: Date.now(), updatedAt: Date.now(),
   messages: [
     { id: "u1", role: "user", content: "open something", createdAt: Date.now() },
-    { id: "a1", role: "assistant", kind: "openui", createdAt: Date.now(),
-      content: 'root = Stack([Button("Open", Action([@OpenUrl("javascript:alert(1)")]))])' }
+    { id: "a1", role: "assistant", kind: "a2ui", createdAt: Date.now(), content: surface }
   ]
 }]));
 location.href = `/chat?id=${id}`;
@@ -870,17 +849,17 @@ location.href = `/chat?id=${id}`;
 Expected: the button renders, clicking it does nothing, and no new tab or dialog opens. Then replace the payload with plain prose:
 
 ```js
-content: "This is a normal sentence, not OpenUI Lang."
+content: "This is a normal sentence, not A2UI."
 ```
 
-Expected: the prose renders as a normal assistant bubble (the Task 4 heuristic), not an empty box or parser error. Finally, replace it with a program that parses but is not renderable (for example `root = Stack([NoSuchComponent()])`) and confirm the `<pre>` fallback shows the raw code.
+Expected: the prose renders as a plain-text fallback, not an empty box or parser error. Finally, replace it with a message that parses but references an unknown component (for example a component named `NoSuchComponent`) and confirm the plain-text fallback shows the raw log.
 
 - [ ] **Step 2: Verify the monochrome rule on rendered answers**
 
-With a rendered OpenUI answer on screen, run in the browser console:
+With a rendered A2UI answer on screen, run in the browser console:
 
 ```js
-[...document.querySelectorAll(".openui-answer *")].map((el) => {
+[...document.querySelectorAll(".a2ui-answer *")].map((el) => {
   const s = getComputedStyle(el);
   return [s.color, s.backgroundColor, s.borderTopColor, s.fill, s.stroke];
 }).flat().filter((v) => {
@@ -889,7 +868,7 @@ With a rendered OpenUI answer on screen, run in the browser console:
 });
 ```
 
-Expected: `[]`. If any entry appears, find the element and add the missing token override to the theme generator, then regenerate.
+Expected: `[]`. If any entry appears, find the element and fix the component implementation in `A2UIAnswer.tsx` — there is no token file to regenerate.
 
 - [ ] **Step 3: Run the full automated gate**
 
@@ -911,7 +890,7 @@ for p in / /chat /chat/settings /plan /help /chat/connect /chat/plugin; do
 done
 ```
 
-Expected: every page returns 200. The OpenUI stylesheet must not affect these pages.
+Expected: every page returns 200.
 
 - [ ] **Step 5: Confirm auth and identity still behave**
 
@@ -919,31 +898,27 @@ Expected: every page returns 200. The OpenUI stylesheet must not affect these pa
 - Confirm the sidebar and greeting use the Keycloak `name` ("Perez Sounds"), never the email.
 - Send a prompt with an expired token and confirm the existing sign-in recovery still works.
 
-- [ ] **Step 6: Commit**
-
-```bash
-git add components/chat/OpenUIAnswer.tsx app/chat/ChatView.tsx app/openui-monochrome.css scripts/generate-openui-theme.mjs
-git commit -m "fix(openui): harden fallbacks and keep answers monochrome"
-```
-
 ---
 
 ## Task 8: Document the Feature for the Next Engineer
 
+**Status:** Done in the A2UI swap (`docs/a2ui.md` + the AGENTS.md rule).
+
 **Files:**
-- Create: `docs/openui.md`
+- Create: `docs/a2ui.md`
 - Modify: `AGENTS.md` (only the `nextjs-agent-rules` / feedback blocks already managed by `next dev` must stay; add a new section below them)
 
 **Interfaces:**
 - Produces: a short operational note covering regeneration, streaming contract, and the one known trade-off.
 
-- [ ] **Step 1: Write `docs/openui.md`**
+- [ ] **Step 1: Write `docs/a2ui.md`**
 
 It must state:
-- How to regenerate the prompt: `node scripts/generate-openui-prompt.mjs` writes `../../sando/src/connnector/openui_spec.zig`; rebuild and restart the backend afterward.
-- How to regenerate the theme: `node scripts/generate-openui-theme.mjs`; never hand-edit `app/openui-monochrome.css`.
-- The NDJSON contract: `{"d":"<base64>"}` frames, terminal `{"done":true}`, `{"error":"..."}` on failure.
+- How to regenerate the catalog: `node scripts/generate-a2ui-catalog.mjs` writes `lib/chat/catalog.json`; never hand-edit the catalog.
+- How to regenerate the backend prompt: `node scripts/generate-a2ui-prompt.mjs` writes `../../sando/src/connnector/a2ui_spec.zig`; rebuild and restart the backend afterward.
+- The NDJSON contract: `{"d":"<base64>"}` frames, one complete A2UI v1.0 message per decoded frame, terminal `{"done":true}`, `{"error":"..."}` on failure.
 - Why `mode: "text"` still exists and when it is used (legacy messages, prompt-only fallback).
+- The client→agent action contract: events with `userMessage` become follow-up prompts; other events become follow-ups carrying `{"a2ui_action": {...}}`.
 - Known trade-off: memory self-editing tags are disabled in UI mode, so facts are updated from plain-text mode only. A follow-up should move memory updates to a side channel if UI mode becomes the only mode.
 
 - [ ] **Step 2: Add the design rule to `AGENTS.md`**
@@ -951,25 +926,20 @@ It must state:
 Below the generated blocks, add:
 
 ```markdown
-## Design: monochrome only
+## Monochrome only
 
-Only black, white, `neutral-*`, and `currentColor` are allowed. Any new
-color must be expressed as a black/white mix. OpenUI tokens are generated
-to grayscale by `scripts/generate-openui-theme.mjs`; do not add colored
-tokens by hand.
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add docs/openui.md AGENTS.md
-git commit -m "docs(openui): document the intelligent UI contract"
+Only black, white, `neutral-*`, and `currentColor` are allowed. Any new color
+must be expressed as a black/white mix. A2UI components are implemented with
+monochrome Tailwind classes in `components/chat/A2UIAnswer.tsx`; do not add
+colored tokens by hand, and never import basic-catalog styles
+(`injectBasicCatalogStyles`) — the Sando catalog carries its own components.
 ```
 
 ---
 
 ## Self-Review Notes
 
-- Spec coverage: dependency install (Task 1), monochrome (Tasks 1 and 7), Zig UI mode (Task 2), Next proxy and client (Task 3), renderer and persistence (Task 4), true streaming (Tasks 5 and 6), failure behavior (Task 7), documentation (Task 8).
+- Spec coverage: dependency install + catalog (Task 1), monochrome (Tasks 1 and 7), Zig UI mode (Task 2), Next proxy and client (Task 3), renderer and persistence (Task 4), true streaming (Tasks 5 and 6), failure behavior (Task 7), documentation (Task 8).
 - Type consistency: `StoredMessage.kind`/`uiState` are introduced in Task 4 and consumed in Tasks 4 and 6. `TokenSink` is introduced in Task 5 and consumed in Task 5 only. `streamPrompt` is introduced in Task 3 and consumed in Task 6. `callBackendStream` is introduced and consumed in Task 3.
 - Deliberate omission: the backend is not a git repository, so backend edits are verified by `zig build`, curl, and the browser rather than commits.
+- The OpenUI integration this plan replaces is fully removed: no `@openuidev/*` package, no `openui-monochrome.css`, no `docs/openui.md`, no `generate-openui-*` script remains in the tree.
