@@ -28,6 +28,8 @@
  * is going too fast; both are passed through so the UI can show the real reason.
  */
 
+import { unstable_rethrow } from "next/navigation";
+
 const DEFAULT_BACKEND = "http://127.0.0.1:22323";
 
 export const DEFAULT_TIMEOUT_MS = 20_000;
@@ -187,6 +189,10 @@ export async function callBackend(
 
     return { ok: true, data };
   } catch (err) {
+    // Next throws internal errors to bail out of prerendering (for example when
+    // a GET route reads request headers). They must reach Next, not become 502s.
+    unstable_rethrow(err);
+
     if (timedOut) {
       return {
         ok: false,
@@ -265,6 +271,9 @@ export async function callBackendStream(
 
     return { ok: true, body: upstream.body };
   } catch (err) {
+    // See callBackend: framework interrupts must not be swallowed here either.
+    unstable_rethrow(err);
+
     if (timedOut) {
       return {
         ok: false,
