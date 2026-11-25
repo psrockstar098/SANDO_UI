@@ -493,8 +493,14 @@ export default function A2UIAnswer({
       try {
         parsed = parseA2UIMessage(line);
       } catch {
-        failedRef.current = true;
-        break;
+        // Prose or a stray memory tag beside the messages: skip it and keep
+        // rendering. A JSON-looking line that fails validation is a real
+        // protocol error, so fall back to plain text instead.
+        if (line.trimStart().startsWith("{")) {
+          failedRef.current = true;
+          break;
+        }
+        continue;
       }
       if (!parsed) continue;
       const errors = processor.processMessagesWithErrors([parsed]);

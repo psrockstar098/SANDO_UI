@@ -115,15 +115,17 @@ export function parseA2UIMessage(line: string): AgentToRendererMessage | null {
 
 /**
  * True once the text holds at least one complete A2UI wire message. A UI-mode
- * reply that is prose fails this, so the chat stores it as text.
+ * reply that is prose fails this, so the chat stores it as text. Stray prose
+ * or a memory tag beside the messages does not disqualify the reply: the
+ * renderer skips those lines, so the rest can still be drawn.
  */
 export function looksLikeA2UI(text: string): boolean {
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     try {
-      return parseA2UIMessage(line) !== null;
+      if (parseA2UIMessage(line)) return true;
     } catch {
-      return false;
+      // Not a message: keep looking at the remaining lines.
     }
   }
   return false;

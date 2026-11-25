@@ -759,10 +759,12 @@ export async function streamPrompt({
   const reader = res.body.getReader();
   let buffer = "";
   let reply = "";
+  /** Frames that were not A2UI messages (prose or memory tags). */
+  let fallback = "";
 
   const withPartial = (err: ApiError): ApiErrorWithPartial => {
     const withReply = err as ApiErrorWithPartial;
-    withReply.partial = reply;
+    withReply.partial = reply || fallback;
     return withReply;
   };
 
@@ -781,11 +783,21 @@ export async function streamPrompt({
       try {
         message = JSON.parse(decoded);
       } catch {
+        // Prose or a memory tag from an older backend: keep it for the
+        // plain-text fallback instead of failing the whole stream.
+        if (!decoded.trimStart().startsWith("{")) {
+          fallback += `${decoded}\n`;
+          return false;
+        }
         throw withPartial(
           new ApiError(`Malformed A2UI message: ${decoded.slice(0, 120)}`, 502),
         );
       }
       if (!isA2UIMessage(message)) {
+        if (!decoded.trimStart().startsWith("{")) {
+          fallback += `${decoded}\n`;
+          return false;
+        }
         throw withPartial(
           new ApiError(
             `Not an A2UI v1.0 message: ${decoded.slice(0, 120)}`,
@@ -799,6 +811,13 @@ export async function streamPrompt({
     return frame.done === true;
   };
 
+  /** A reply with no usable UI is stored as plain text by the caller. */
+  const result = (): StreamChatResponse => {
+    const text = reply || fallback.trim();
+    if (!text) throw new ApiError("Sando returned no answer.", 502);
+    return { reply: text, mode: "ui" };
+  };
+
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -806,7 +825,7 @@ export async function streamPrompt({
       buffer += wire.decode(value, { stream: true });
       let nl = buffer.indexOf("\n");
       while (nl !== -1) {
-        if (handleLine(buffer.slice(0, nl))) return { reply, mode: "ui" };
+        if (handleLine(buffer.slice(0, nl))) return result();
         buffer = buffer.slice(nl + 1);
         nl = buffer.indexOf("\n");
       }
@@ -816,7 +835,7 @@ export async function streamPrompt({
     buffer += wire.decode();
     if (buffer.trim()) handleLine(buffer);
     payload.decode();
-    return { reply, mode: "ui" };
+    return result();
   } catch (err) {
     if (err instanceof ApiError) throw err;
     if (isAbortError(err)) throw err;

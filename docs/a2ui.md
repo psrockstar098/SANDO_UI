@@ -42,13 +42,18 @@ in `components/chat/A2UIAnswer.tsx`. No basic-catalog styles are imported, so
 monochrome holds by construction — every component uses only `black`, `white`,
 `neutral-*`, `transparent`, and `currentColor`.
 
-The backend prompt is generated from the same catalog (see the plan, Task 2):
+The backend prompt is generated from the same catalog:
 
 ```bash
-node scripts/generate-a2ui-prompt.mjs   # writes ../../sando/src/connnector/a2ui_spec.zig
+# In the sando backend checkout
+node src/connnector/generate-a2ui-prompt.mjs
 ```
 
-Rebuild and restart the Zig backend afterward.
+It writes `src/connnector/a2ui_spec.zig`. The generated text also states the
+two rules the processor enforces outside the JSON Schema: component ids must
+be UAX #31 identifiers (camelCase; no hyphens), and a `Button.action` is
+either `{"event": {...}}` or `{"functionCall": {"@call": ...}}`. Rebuild and
+restart the Zig backend afterward.
 
 ## Wire format (v1.0)
 
@@ -81,9 +86,15 @@ array, even in mutuallyExclusive mode. The `MessageProcessor` is built with
   never `toPlainText`ed.
 - Streaming (ui mode only): `content-type: application/x-ndjson`, frames
   `{"d":"<base64>"}`, terminal `{"done":true}`, `{"error":"..."}` on failure.
-  Each decoded `d` frame is exactly one complete A2UI message. The client
-  parses and validates it (`isA2UIMessage`), appends it to the stored wire
-  log, and feeds it to `processor.processMessages([message])` in order.
+  Each decoded `d` frame is exactly one complete A2UI message. The backend
+  only forwards lines that are valid v1.0 envelopes; prose and
+  `<<<MEMORY_...>>>` tags are dropped. If the model produced no usable
+  message, the backend synthesizes one `createSurface` with a plain `Text`
+  component carrying the prose, so the answer still reaches the user. The
+  client parses and validates each message (`isA2UIMessage`), appends it to
+  the stored wire log, and feeds it to `processor.processMessages([message])`
+  in order. Stray non-JSON lines from an older backend are skipped; a reply
+  with no usable UI is stored as `kind: "text"`.
 
 ## Client storage
 
